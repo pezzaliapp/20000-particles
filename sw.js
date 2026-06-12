@@ -1,4 +1,4 @@
-const CACHE = '20000-particles-v12';
+const CACHE = '20000-particles-v13';
 const ASSETS = [
   './',
   './index.html',
