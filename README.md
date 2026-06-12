@@ -41,13 +41,14 @@ MIT License
 
 Note: the microphone requires HTTPS — it works on GitHub Pages and as an installed PWA.
 
-## Photo mode
+## Photo skin
 
-- **📷 Photo** — load a picture or take a shot (on phones the picker offers the camera directly)
-- The image is decomposed: each of the 20,000 particles is assigned to a pixel in shuffled order, so during the morph they cross and mix mid-air before recomposing the picture
-- Luminance becomes a 3D relief; touch makes pixels pop toward you and flare
-- With audio active the photo dances: bass pumps the relief, the spectrum sweeps it left (bass) to right (treble) like a spectrogram, beats flash the brightness
-- Tap Photo again to load a different image; Calm or Swarm morph back to the sphere
+- **📷 Photo** — load a picture or take a shot; it wraps the sphere like a planet texture, each particle taking the color of its pixel
+- Works WITH Calm and Swarm: a slowly turning globe of your photo in Calm, the same photo burning and shaking in Swarm
+- Luminance becomes surface relief that pumps with the bass; beats flash the picture, touch makes pixels flare
+- Particles join the picture one by one in a sparkle dissolve when it loads
+- Tap Photo to toggle the skin on/off; double-tap to pick a different image
+
 
 ## Demo track
 
