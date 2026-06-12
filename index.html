@@ -224,6 +224,28 @@
     const data = sctx.getImageData(0, 0, S, S).data;
     if (bmp.close) bmp.close();
 
+    // auto-contrast: stretch the luminance histogram (clip 2% tails)
+    const hist = new Uint32Array(256);
+    for (let p = 0; p < data.length; p += 4) {
+      const l = (data[p] * 54 + data[p + 1] * 183 + data[p + 2] * 19) >> 8;
+      hist[l]++;
+    }
+    const total = S * S, clip = total * 0.02;
+    let lo = 0, hiV = 255, acc = 0;
+    for (let l = 0; l < 256; l++) { acc += hist[l]; if (acc > clip) { lo = l; break; } }
+    acc = 0;
+    for (let l = 255; l >= 0; l--) { acc += hist[l]; if (acc > clip) { hiV = l; break; } }
+    const range = Math.max(30, hiV - lo) / 255;
+    const loN = lo / 255;
+
+    // additive blending eats midtones: stretch, gamma-lift, boost
+    const GAMMA = 0.65, BOOST = 1.35, FLOOR = 0.04;
+    function px(v) {
+      let c = (v / 255 - loN) / range;
+      c = Math.max(0, Math.min(1, c));
+      return Math.min(1, Math.pow(c, GAMMA) * BOOST + FLOOR);
+    }
+
     // equirectangular mapping: longitude -> u, latitude -> v.
     // The photo appears on the front and wraps around the back mirrored,
     // so there is no ugly seam while the globe rotates.
@@ -238,10 +260,9 @@
       const p4 = (sy * S + sx) * 4;
       const r = data[p4] / 255, g = data[p4 + 1] / 255, b = data[p4 + 2] / 255;
       const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      // gentle lift so shadows still glow
-      imgCol[ix] = Math.min(1, r * 1.2 + 0.03);
-      imgCol[ix + 1] = Math.min(1, g * 1.2 + 0.03);
-      imgCol[ix + 2] = Math.min(1, b * 1.2 + 0.03);
+      imgCol[ix] = px(data[p4]);
+      imgCol[ix + 1] = px(data[p4 + 1]);
+      imgCol[ix + 2] = px(data[p4 + 2]);
       imgRel[i] = (lum - 0.5); // -0.5..0.5 relief
     }
     hasImage = true;
@@ -592,6 +613,10 @@
     const reliefAmp = photoSkin * (0.10 + bass * 0.18) * (1 - agitation * 0.4);
     const photoBeatLum = 1 + (beat * 0.5 + level * 0.25) * (audioMode !== 'none' ? 1 : 0);
 
+    // bigger points when the photo skin is on: more light, more detail
+    const baseSize = isSmall ? 0.016 : 0.013;
+    material.size = baseSize * (1 + photoSkin * 0.75);
+
     for (let i = 0; i < COUNT; i++) {
       const ix = i * 3;
       const dx = dirs[ix], dy = dirs[ix + 1], dz = dirs[ix + 2];
@@ -638,7 +663,7 @@
       if (s > 0.001) {
         // in Swarm the photo burns: pixels lean toward the hot palette
         const burn = agitation * Math.min(1, mixHot + sv) * 0.45;
-        const shimmer = (0.85 + 0.15 * flick) * photoBeatLum + heat * 1.1;
+        const shimmer = (0.95 + 0.12 * flick) * photoBeatLum + heat * 1.1;
         const pr = (imgCol[ix] * (1 - burn) + cr * burn) * shimmer;
         const pg = (imgCol[ix + 1] * (1 - burn) + cg * burn) * shimmer;
         const pb = (imgCol[ix + 2] * (1 - burn) + cb * burn) * shimmer;
