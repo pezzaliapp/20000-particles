@@ -88,7 +88,6 @@
   button.mode:focus-visible { outline: 2px solid #f5c97a; outline-offset: 2px; }
   #fileInput, #imageInput { display: none; }
 
-  /* photo menu popover */
   #photoMenu {
     position: fixed;
     bottom: calc(72px + env(safe-area-inset-bottom));
@@ -100,7 +99,6 @@
   }
   #photoMenu.open { display: flex; }
 
-  /* camera overlay */
   #camOverlay {
     position: fixed;
     inset: 0;
@@ -156,7 +154,7 @@
 
 <header>
   <div>
-    <div class="title">20000 Particles <span style="color:#5c5c5c;font-size:10px;font-weight:400">v13</span></div>
+    <div class="title">20000 Particles <span style="color:#5c5c5c;font-size:10px;font-weight:400">v14</span></div>
     <div class="sub">
       <span id="sourceLabel">count = 20000 &middot; THREE.Points</span>
       <span id="vu"><span id="vuFill"></span></span>
@@ -168,7 +166,7 @@
 <nav>
   <button class="mode active" id="btnCalm">Calm</button>
   <button class="mode" id="btnSwarm">Swarm</button>
-  <button class="mode" id="btnPhoto">&#128247; Hologram</button>
+  <button class="mode" id="btnPhoto">&#128247; Photo</button>
   <button class="mode" id="btnMic">&#127908; Mic</button>
   <button class="mode" id="btnTrack">&#9835; Track</button>
   <button class="mode" id="btnDemo">&#9658; Demo</button>
@@ -223,7 +221,7 @@
   ctx.fillRect(0, 0, 64, 64);
   const sprite = new THREE.CanvasTexture(cnv);
 
-  // Fibonacci sphere; each particle owns a frequency band by latitude
+  // base Fibonacci sphere (the golden swarm)
   const dirs = new Float32Array(COUNT * 3);
   const phase = new Float32Array(COUNT);
   const freq = new Float32Array(COUNT);
@@ -266,17 +264,15 @@
   const hotA = new THREE.Color(1.0, 0.42, 0.13);
   const hotB = new THREE.Color(1.0, 0.72, 0.35);
 
-  // ============ HOLOGRAM ============
-  // The photo becomes a free-standing 3D point cloud facing the viewer:
-  // bright pixels float forward (real depth), a light scanline sweeps it,
-  // Calm makes it hover, Swarm frays its shadows into the swarm,
-  // bass pumps its depth. Drag to look around it: it eases back to face you.
-  const imgPos = new Float32Array(COUNT * 3);
+  // ============ PHOTO PLANET ============
+  // The photo IS the sphere. Particles are importance-sampled where the
+  // image has LIGHT and placed on the sphere surface: the picture wraps
+  // the front, mirrored on the back, seamless while it spins. All the
+  // sphere's life applies to it — rotation, breathing, Swarm boil, music,
+  // touch. Dark areas hold no particles: the portrait is made of light.
+  const imgDir = new Float32Array(COUNT * 3);
   const imgCol = new Float32Array(COUNT * 3);
   const imgLum = new Float32Array(COUNT);
-  const imgVig = new Float32Array(COUNT);
-  const imgBandX = new Uint8Array(COUNT); // spectrum column, left=bass right=treble
-  let planeH = 2;
   let hasImage = false;
   let photoOn = false;
   let photoSkin = 0;
@@ -294,76 +290,33 @@
         im.src = URL.createObjectURL(file);
       });
     }
-    const aspect = bmp.width / bmp.height;
-    let cols = Math.round(Math.sqrt(COUNT * aspect));
-    let rows = Math.ceil(COUNT / cols);
-
+    // cover-crop to square so it wraps the sphere undistorted
+    const S = 220;
     const sc = document.createElement('canvas');
-    sc.width = cols; sc.height = rows;
+    sc.width = S; sc.height = S;
     const sctx = sc.getContext('2d', { willReadFrequently: true });
-    sctx.drawImage(bmp, 0, 0, cols, rows);
-    const data = sctx.getImageData(0, 0, cols, rows).data;
+    const side = Math.min(bmp.width, bmp.height);
+    sctx.drawImage(
+      bmp,
+      (bmp.width - side) / 2, (bmp.height - side) / 2, side, side,
+      0, 0, S, S
+    );
+    const data = sctx.getImageData(0, 0, S, S).data;
     if (bmp.close) bmp.close();
 
-    // auto-contrast (clip 2% tails) + gamma lift: additive points eat midtones
+    // auto-contrast (clip 2% tails)
     const hist = new Uint32Array(256);
     for (let p = 0; p < data.length; p += 4) {
       const l = (data[p] * 54 + data[p + 1] * 183 + data[p + 2] * 19) >> 8;
       hist[l]++;
     }
-    const total = cols * rows, clip = total * 0.02;
+    const total = S * S, clip = total * 0.02;
     let lo = 0, hi = 255, acc = 0;
     for (let l = 0; l < 256; l++) { acc += hist[l]; if (acc > clip) { lo = l; break; } }
     acc = 0;
     for (let l = 255; l >= 0; l--) { acc += hist[l]; if (acc > clip) { hi = l; break; } }
     const range = Math.max(30, hi - lo) / 255;
     const loN = lo / 255;
-
-    // panel size in view
-    let planeW = 2.5;
-    planeH = planeW / aspect;
-    if (planeH > 2.05) { planeH = 2.05; planeW = planeH * aspect; }
-    if (planeW > 2.6) { planeW = 2.6; planeH = planeW / aspect; }
-
-    // ===== IMPORTANCE SAMPLING =====
-    // Particles go where the LIGHT is: bright areas get dense constellations,
-    // dark areas stay truly empty. The picture emerges from light instead of
-    // drowning in a veil of gray dust.
-    const lumGrid = new Float32Array(cols * rows);
-    for (let c = 0; c < cols * rows; c++) {
-      const p4 = c * 4;
-      lumGrid[c] = (data[p4] * 0.2126 + data[p4 + 1] * 0.7152 + data[p4 + 2] * 0.0722) / 255;
-    }
-    // blurred luminance for a tear-free, subtle relief
-    const lumBlur = new Float32Array(cols * rows);
-    for (let yB = 0; yB < rows; yB++) {
-      for (let xB = 0; xB < cols; xB++) {
-        let sB = 0, c2 = 0;
-        for (let oy = -2; oy <= 2; oy++) {
-          const yy = yB + oy;
-          if (yy < 0 || yy >= rows) continue;
-          for (let ox = -2; ox <= 2; ox++) {
-            const xx = xB + ox;
-            if (xx < 0 || xx >= cols) continue;
-            sB += lumGrid[yy * cols + xx]; c2++;
-          }
-        }
-        lumBlur[yB * cols + xB] = sB / c2;
-      }
-    }
-    // sampling weights: luminance^1.6, oval vignette, tiny floor for context
-    const cum = new Float64Array(cols * rows);
-    let wTotal = 0;
-    for (let c = 0; c < cols * rows; c++) {
-      const cx2 = c % cols, cy2 = (c / cols) | 0;
-      const nx = (cx2 + 0.5) / cols - 0.5, ny = (cy2 + 0.5) / rows - 0.5;
-      const re = Math.sqrt(nx * nx * 4 + ny * ny * 4);
-      let vig = 1 - Math.max(0, (re - 0.78) / 0.32);
-      vig = Math.max(0, Math.min(1, vig)); vig *= vig;
-      wTotal += Math.pow(lumGrid[c], 1.6) * vig + 0.0035 * vig;
-      cum[c] = wTotal;
-    }
-
     const GAMMA = 0.7, BOOST = 1.25;
     function px(v) {
       let c = (v / 255 - loN) / range;
@@ -371,41 +324,52 @@
       return Math.min(1, Math.pow(c, GAMMA) * BOOST);
     }
 
-    const DEPTH = 0.14;
-    const cellW = planeW / cols, cellH = planeH / rows;
+    // importance sampling on the SPHERE: weight = luminance * sin(theta)
+    // (solid-angle correction) -> particles live where the light lives.
+    const lumGrid = new Float32Array(S * S);
+    for (let c = 0; c < S * S; c++) {
+      const p4 = c * 4;
+      lumGrid[c] = (data[p4] * 0.2126 + data[p4 + 1] * 0.7152 + data[p4 + 2] * 0.0722) / 255;
+    }
+    const cum = new Float64Array(S * S);
+    let wTotal = 0;
+    for (let c = 0; c < S * S; c++) {
+      const cy2 = (c / S) | 0;
+      const theta = ((cy2 + 0.5) / S) * Math.PI;
+      wTotal += (Math.pow(lumGrid[c], 1.5) + 0.004) * Math.sin(theta);
+      cum[c] = wTotal;
+    }
+
     for (let i = 0; i < COUNT; i++) {
-      // draw a cell from the luminance distribution (binary search the CDF)
-      const rTarget = Math.random() * wTotal;
-      let a = 0, b2 = cols * rows - 1;
+      const rT = Math.random() * wTotal;
+      let a = 0, b2 = S * S - 1;
       while (a < b2) {
         const m = (a + b2) >> 1;
-        if (cum[m] < rTarget) a = m + 1; else b2 = m;
+        if (cum[m] < rT) a = m + 1; else b2 = m;
       }
       const cell = a;
-      const cx = cell % cols;
-      const cy = (cell / cols) | 0;
-      const u = (cx + 0.5) / cols;
-      const v = (cy + 0.5) / rows;
-      const p4 = cell * 4;
-      const lum = lumGrid[cell];
+      const cx = cell % S;
+      const cy = (cell / S) | 0;
+      // sub-pixel jitter: organic, no grid
+      const u = (cx + 0.5 + (Math.random() - 0.5)) / S;
+      const v = (cy + 0.5 + (Math.random() - 0.5)) / S;
 
+      // the picture covers the front hemisphere; half the particles build
+      // a mirrored copy on the back, so the globe is full while it spins
+      const theta = v * Math.PI;
+      const phiFront = (u - 0.5) * Math.PI;
+      const mirror = (i & 1) === 0 ? 1 : -1;
+      const sinT = Math.sin(theta);
       const ix = i * 3;
-      // sub-pixel jitter: organic constellations, no grid pattern
-      imgPos[ix] = (u - 0.5) * planeW + (Math.random() - 0.5) * cellW * 1.2;
-      imgPos[ix + 1] = (0.5 - v) * planeH + (Math.random() - 0.5) * cellH * 1.2;
-      imgPos[ix + 2] = (lumBlur[cell] - 0.45) * DEPTH;
+      imgDir[ix] = Math.sin(phiFront) * sinT;
+      imgDir[ix + 1] = Math.cos(theta);
+      imgDir[ix + 2] = Math.cos(phiFront) * sinT * mirror;
 
-      const nx = u - 0.5, ny = v - 0.5;
-      const re = Math.sqrt(nx * nx * 4 + ny * ny * 4);
-      let vig = 1 - Math.max(0, (re - 0.78) / 0.32);
-      vig = Math.max(0, Math.min(1, vig));
-
-      imgCol[ix] = px(data[p4]) * vig;
-      imgCol[ix + 1] = px(data[p4 + 1]) * vig;
-      imgCol[ix + 2] = px(data[p4 + 2]) * vig;
-      imgLum[i] = lum;
-      imgVig[i] = vig;
-      imgBandX[i] = Math.min(BANDS - 1, (u * BANDS) | 0);
+      const p4 = cell * 4;
+      imgCol[ix] = px(data[p4]);
+      imgCol[ix + 1] = px(data[p4 + 1]);
+      imgCol[ix + 2] = px(data[p4 + 2]);
+      imgLum[i] = lumGrid[cell];
     }
     hasImage = true;
   }
@@ -414,7 +378,6 @@
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2(10, 10);
   const hitSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), RADIUS);
-  const flatPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
   const hitPoint = new THREE.Vector3();
   const localHit = new THREE.Vector3();
   const tmp = new THREE.Vector3();
@@ -616,7 +579,7 @@
     setLabel('<span class="live">&#9654;</span> ' + DEMO_NAME);
   });
 
-  // --- Hologram: tap opens a small menu (Library / Camera / Show-Hide) ---
+  // --- Photo: menu (Library / Camera / Show-Hide) ---
   const photoMenu = document.getElementById('photoMenu');
   const pmLibrary = document.getElementById('pmLibrary');
   const pmCamera = document.getElementById('pmCamera');
@@ -655,7 +618,6 @@
     if (photoOn) photoReveal = 0;
   });
 
-  // --- live camera (webcam on Mac/PC, front/back camera on phones) ---
   async function openCamera() {
     closePhotoMenu();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -693,7 +655,7 @@
     const shot = document.createElement('canvas');
     shot.width = w; shot.height = h;
     const sx = shot.getContext('2d');
-    if (camFacing === 'user') { // mirror selfies so they match the preview
+    if (camFacing === 'user') {
       sx.translate(w, 0); sx.scale(-1, 1);
     }
     sx.drawImage(camVideo, 0, 0, w, h);
@@ -705,7 +667,7 @@
       photoOn = true;
       photoReveal = 0;
       btnPhoto.classList.add('active');
-      setLabel('hologram &middot; tap &#128247; for options');
+      setLabel('photo planet &middot; tap &#128247; for options');
     } catch (e) {
       setLabel('could not capture that shot');
     }
@@ -720,7 +682,7 @@
       photoOn = true;
       photoReveal = 0;
       btnPhoto.classList.add('active');
-      setLabel('hologram &middot; tap &#128247; for options');
+      setLabel('photo planet &middot; tap &#128247; for options');
     } catch (e) {
       setLabel('could not read that image');
     }
@@ -780,7 +742,7 @@
   }
 
   // ============ MODES ============
-  let modeTarget = 0; // 0 = Calm, 1 = Swarm — both shape the hologram too
+  let modeTarget = 0; // 0 = Calm, 1 = Swarm — they shape the photo planet too
   function setMode(m) {
     modeTarget = m;
     btnCalm.classList.toggle('active', m === 0);
@@ -806,8 +768,7 @@
 
     const ps = photoSkin;
     const sw = 1 - ps;
-    // mid-morph turbulence: decomposed, mixed, recomposed
-    const scramble = ps * (1 - ps) * 4;
+    const scramble = ps * (1 - ps) * 4; // decompose / mix / recompose in flight
 
     const audioResp = 0.35 + 0.65 * agitation;
     const audioEnergy = (audioMode !== 'none')
@@ -815,122 +776,70 @@
       : 0;
     const energy = Math.min(1, agitation * 0.85 + touchHeat * 0.6 + audioEnergy);
 
-    // rotation: drift on the sphere; the hologram eases back to face you
-    group.rotation.y += driftSpeed * (1 + audioEnergy * 4) * sw + velY;
+    // THE SPHERE ALWAYS SPINS — photo or not. That is its life.
+    group.rotation.y += driftSpeed * (1 + audioEnergy * 4) + velY;
     group.rotation.x += velX;
-    if (ps > 0.2) {
-      const ry = group.rotation.y;
-      const home = Math.round(ry / TWO_PI) * TWO_PI;
-      // the hologram is never frozen: it sways gently so the depth shows
-      const sway = Math.sin(t * 0.32) * 0.13;
-      group.rotation.y += (home + sway - ry) * 0.06 * ps;
-      group.rotation.x += (Math.sin(t * 0.21) * 0.05 - group.rotation.x) * 0.06 * ps;
-      if (ps > 0.6) {
-        const dev = group.rotation.y - home;
-        const MAXDEV = 0.4;
-        if (dev > MAXDEV) group.rotation.y = home + MAXDEV;
-        else if (dev < -MAXDEV) group.rotation.y = home - MAXDEV;
-        if (group.rotation.x > MAXDEV) group.rotation.x = MAXDEV;
-        else if (group.rotation.x < -MAXDEV) group.rotation.x = -MAXDEV;
-      }
-    }
     velX *= 0.92; velY *= 0.92;
 
     hasHit = false;
     if (ndc.x < 5) {
       raycaster.setFromCamera(ndc, camera);
-      const ok = ps > 0.5
-        ? raycaster.ray.intersectPlane(flatPlane, hitPoint)
-        : raycaster.ray.intersectSphere(hitSphere, hitPoint);
-      if (ok) {
+      if (raycaster.ray.intersectSphere(hitSphere, hitPoint)) {
         inv.copy(group.matrixWorld).invert();
         localHit.copy(hitPoint).applyMatrix4(inv);
         hasHit = true;
       }
     }
 
-    const jitterAmp = 0.05 * energy;
+    // shared radius dynamics: breathing, jitter, spectrum waves by latitude
+    const jitterAmp = 0.05 * energy + 0.008 * ps; // the photo shimmers even in Calm
     const breathe = 1 + 0.012 * Math.sin(t * 1.4)
       + bass * 0.12 * audioResp
       + beat * 0.07 * audioResp;
-    const specAmp = (0.16 + 0.26 * agitation) + beat * 0.12 * agitation;
+    const specAmp = (0.16 + 0.26 * agitation) * (1 - ps * 0.55) + beat * 0.10 * agitation;
     const heatResp = 0.35 + 0.65 * agitation;
-
-    // hologram dynamics — ALIVE: every particle orbits its pixel, always
-    const depthPulse = 1 + bass * 0.7 + beat * 0.25;
-    const orbR = 0.014                       // base orbit radius (fireflies in formation)
-      + agitation * 0.030                    // Swarm widens the orbits
-      + level * 0.022 + beat * 0.015;        // music swells them
-    const orbSpd = 1.3 + agitation * 1.6 + level * 1.8;
-    const breathXY = 1 + 0.013 * Math.sin(t * 1.1) + bass * 0.05 + beat * 0.02;
-    const waveAmp = 0.030 + agitation * 0.04 + bass * 0.03;
-    const specZ = (audioMode !== 'none') ? 0.08 : 0;
-    const scanY = ((t * 0.45) % 2.6 - 1.3) * (planeH * 0.75);
     const photoBeatLum = 1 + (beat * 0.5 + level * 0.25) * (audioMode !== 'none' ? 1 : 0);
 
-    // bigger points when the hologram is on: more light, more detail
-    material.size = BASE_SIZE * (1 + ps * 0.9);
+    material.size = BASE_SIZE * (1 + ps * 0.7);
 
     for (let i = 0; i < COUNT; i++) {
       const ix = i * 3;
-      const dx = dirs[ix], dy = dirs[ix + 1], dz = dirs[ix + 2];
 
-      // --- sphere target ---
+      // direction: golden Fibonacci sphere <-> photo constellation
+      let dx = dirs[ix] * sw + imgDir[ix] * ps;
+      let dy = dirs[ix + 1] * sw + imgDir[ix + 1] * ps;
+      let dz = dirs[ix + 2] * sw + imgDir[ix + 2] * ps;
+      const dl = 1 / Math.sqrt(dx * dx + dy * dy + dz * dz + 1e-9);
+      dx *= dl; dy *= dl; dz *= dl;
+
+      // radius: the same living dynamics for swarm and photo planet
       const n = Math.sin(t * 2.0 * freq[i] + phase[i]);
       let r = RADIUS * breathe + n * jitterAmp;
       const svS = spectrum[band[i]];
       r += svS * specAmp * (0.5 + 0.5 * Math.sin(phase[i] + t * 3));
-      const sx = dx * r, sy = dy * r, sz = dz * r;
 
-      // --- hologram target: a living constellation, never frozen ---
-      const lum = imgLum[i];
-      // perpetual elliptical orbit around its own pixel, unique per particle
-      const oa = t * orbSpd * (0.6 + freq[i] * 0.55) + phase[i];
-      const oR = orbR * (0.5 + 0.7 * (phase[i] / TWO_PI)); // size varies per particle
-      let hx = imgPos[ix] * breathXY + Math.cos(oa) * oR;
-      let hy = imgPos[ix + 1] * breathXY + Math.sin(oa * 1.31 + phase[i]) * oR;
-      let hz = imgPos[ix + 2] * depthPulse
-        + Math.cos(oa * 0.7) * oR * 0.8
-        + Math.sin(imgPos[ix] * 2.6 + imgPos[ix + 1] * 1.4 + t * 1.8) * waveAmp
-        + spectrum[imgBandX[i]] * specZ;
-
-      // --- blend + mid-flight scramble ---
-      let X = sx * sw + hx * ps;
-      let Y = sy * sw + hy * ps;
-      let Z = sz * sw + hz * ps;
+      // mid-morph scramble
       if (scramble > 0.01) {
-        const s2 = scramble * 0.30;
-        X += Math.sin(t * 7.0 * freq[i] + phase[i]) * s2;
-        Y += Math.sin(t * 6.3 * freq[i] + phase[i] * 1.7) * s2;
-        Z += Math.cos(t * 5.1 * freq[i] + phase[i] * 2.3) * s2;
+        r += Math.sin(t * 6.3 * freq[i] + phase[i] * 1.7) * scramble * 0.22;
       }
 
-      // --- touch ---
+      // touch: heat and push
       let heat = 0;
       if (hasHit) {
-        tmp.set(
-          dx * sw + imgPos[ix] * ps,
-          dy * sw + imgPos[ix + 1] * ps,
-          dz * sw + imgPos[ix + 2] * ps
-        );
+        tmp.set(dx, dy, dz);
         const d = tmp.distanceTo(localHit);
         if (d < 0.55) {
           const f = (1 - d / 0.55) * (1 - d / 0.55);
-          const push = f * 0.28 * (0.4 + touchHeat);
-          if (ps > 0.5) {
-            Z += push; // hologram: pixels pop toward you
-          } else {
-            X += dx * push; Y += dy * push; Z += dz * push;
-          }
+          r += f * 0.28 * (0.4 + touchHeat);
           heat = f;
         }
       }
 
-      positions[ix] = X;
-      positions[ix + 1] = Y;
-      positions[ix + 2] = Z;
+      positions[ix] = dx * r;
+      positions[ix + 1] = dy * r;
+      positions[ix + 2] = dz * r;
 
-      // --- procedural color (gold / orange sphere) ---
+      // --- procedural color ---
       const local = Math.min(1, Math.abs(n) * energy * 1.4 + heat + svS * 1.2 * heatResp);
       const mixHot = Math.min(1, Math.max(energy * 0.85, local) + beat * 0.3 * heatResp);
       const flick = 0.5 + 0.5 * Math.sin(t * (3 + highs * 14) * freq[i] + phase[i] * 2);
@@ -941,18 +850,16 @@
         * (1 + beat * 0.35 * audioResp);
       cr *= lumP; cg *= lumP; cb *= lumP;
 
-      // --- hologram color: photo pixels + scanline + heat flare ---
+      // --- photo color: pixel light + twinkle + Swarm burn + heat flare ---
       let s = ps;
       if (ps > 0.001 && photoReveal < 1) {
         const stagger = phase[i] / TWO_PI;
         s *= Math.max(0, Math.min(1, (photoReveal * 1.6 - stagger) * 2.5));
       }
       if (s > 0.001) {
-        const scan = 1 + 0.5 * Math.max(0, 1 - Math.abs(imgPos[ix + 1] - scanY) * 5);
-        // Swarm warms the shadows; the picture itself stays true
-        const burn = agitation * (1 - lum) * 0.3 * imgVig[i];
-        // firefly twinkle: each particle pulses its own brightness
-        const shimmer = (0.78 + 0.38 * flick) * photoBeatLum * scan + heat * 1.2;
+        const lum = imgLum[i];
+        const burn = agitation * (1 - lum) * 0.35 + heat * 0.5;
+        const shimmer = (0.82 + 0.32 * flick) * photoBeatLum + heat * 1.0;
         const pr = (imgCol[ix] * (1 - burn) + cr * burn) * shimmer;
         const pg = (imgCol[ix + 1] * (1 - burn) + cg * burn) * shimmer;
         const pb = (imgCol[ix + 2] * (1 - burn) + cb * burn) * shimmer;
