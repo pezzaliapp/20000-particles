@@ -41,13 +41,15 @@ MIT License
 
 Note: the microphone requires HTTPS — it works on GitHub Pages and as an installed PWA.
 
-## Photo skin
+## Hologram
 
-- **📷 Photo** — load a picture or take a shot; it wraps the sphere like a planet texture, each particle taking the color of its pixel
-- Works WITH Calm and Swarm: a slowly turning globe of your photo in Calm, the same photo burning and shaking in Swarm
-- Luminance becomes surface relief that pumps with the bass; beats flash the picture, touch makes pixels flare
-- Particles join the picture one by one in a sparkle dissolve when it loads
-- Tap Photo to toggle the skin on/off; double-tap to pick a different image
+- **📷 Hologram** — load a picture or take a shot; it becomes a free-standing 3D point cloud facing you
+- Real depth: bright pixels float toward the viewer, dark ones recede, like a relief bust
+- A light scanline sweeps the image; drag to look around it, it eases back to face you
+- Calm: the hologram hovers gently. Swarm: its shadows fray into the swarm and glow hot while the bright structure holds, so the picture stays readable
+- Audio: bass pumps the depth, the spectrum ripples it left (bass) to right (treble), beats flash it
+- Auto-contrast + gamma lift keep any photo bright on the additive renderer; points grow ~2x while the hologram is on
+- Tap to toggle on/off; double-tap to pick a different image
 
 
 ## Demo track

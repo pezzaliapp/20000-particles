@@ -106,7 +106,7 @@
 <nav>
   <button class="mode active" id="btnCalm">Calm</button>
   <button class="mode" id="btnSwarm">Swarm</button>
-  <button class="mode" id="btnPhoto">&#128247; Photo</button>
+  <button class="mode" id="btnPhoto">&#128247; Hologram</button>
   <button class="mode" id="btnMic">&#127908; Mic</button>
   <button class="mode" id="btnTrack">&#9835; Track</button>
   <button class="mode" id="btnDemo">&#9658; Demo</button>
@@ -122,6 +122,7 @@
   const isSmall = Math.min(window.innerWidth, window.innerHeight) < 700;
   const COUNT = isSmall ? 9000 : 20000;
   const RADIUS = 1;
+  const TWO_PI = Math.PI * 2;
 
   // ============ SCENE ============
   const scene = new THREE.Scene();
@@ -170,8 +171,9 @@
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
+  const BASE_SIZE = isSmall ? 0.016 : 0.013;
   const material = new THREE.PointsMaterial({
-    size: isSmall ? 0.016 : 0.013,
+    size: BASE_SIZE,
     map: sprite,
     vertexColors: true,
     transparent: true,
@@ -187,16 +189,20 @@
   const hotA = new THREE.Color(1.0, 0.42, 0.13);
   const hotB = new THREE.Color(1.0, 0.72, 0.35);
 
-  // ============ PHOTO SKIN ============
-  // The photo wraps the sphere like a planet texture: every particle
-  // samples the pixel under its own spherical coordinates. It works WITH
-  // Calm and Swarm — the globe of your photo breathes, burns, dances.
-  const imgCol = new Float32Array(COUNT * 3); // pixel color per particle
-  const imgRel = new Float32Array(COUNT);     // luminance relief per particle
+  // ============ HOLOGRAM ============
+  // The photo becomes a free-standing 3D point cloud facing the viewer:
+  // bright pixels float forward (real depth), a light scanline sweeps it,
+  // Calm makes it hover, Swarm frays its shadows into the swarm,
+  // bass pumps its depth. Drag to look around it: it eases back to face you.
+  const imgPos = new Float32Array(COUNT * 3);
+  const imgCol = new Float32Array(COUNT * 3);
+  const imgLum = new Float32Array(COUNT);
+  const imgBandX = new Uint8Array(COUNT); // spectrum column, left=bass right=treble
+  let planeH = 2;
   let hasImage = false;
   let photoOn = false;
-  let photoSkin = 0;       // smoothed 0..1
-  let photoReveal = 0;     // sparkle-dissolve sweep on load
+  let photoSkin = 0;
+  let photoReveal = 0;
 
   async function loadImageFile(file) {
     let bmp;
@@ -210,35 +216,30 @@
         im.src = URL.createObjectURL(file);
       });
     }
-    // sample buffer: cover-crop to square so the photo wraps undistorted
-    const S = 320;
+    const aspect = bmp.width / bmp.height;
+    let cols = Math.round(Math.sqrt(COUNT * aspect));
+    let rows = Math.ceil(COUNT / cols);
+
     const sc = document.createElement('canvas');
-    sc.width = S; sc.height = S;
+    sc.width = cols; sc.height = rows;
     const sctx = sc.getContext('2d', { willReadFrequently: true });
-    const side = Math.min(bmp.width, bmp.height);
-    sctx.drawImage(
-      bmp,
-      (bmp.width - side) / 2, (bmp.height - side) / 2, side, side,
-      0, 0, S, S
-    );
-    const data = sctx.getImageData(0, 0, S, S).data;
+    sctx.drawImage(bmp, 0, 0, cols, rows);
+    const data = sctx.getImageData(0, 0, cols, rows).data;
     if (bmp.close) bmp.close();
 
-    // auto-contrast: stretch the luminance histogram (clip 2% tails)
+    // auto-contrast (clip 2% tails) + gamma lift: additive points eat midtones
     const hist = new Uint32Array(256);
     for (let p = 0; p < data.length; p += 4) {
       const l = (data[p] * 54 + data[p + 1] * 183 + data[p + 2] * 19) >> 8;
       hist[l]++;
     }
-    const total = S * S, clip = total * 0.02;
-    let lo = 0, hiV = 255, acc = 0;
+    const total = cols * rows, clip = total * 0.02;
+    let lo = 0, hi = 255, acc = 0;
     for (let l = 0; l < 256; l++) { acc += hist[l]; if (acc > clip) { lo = l; break; } }
     acc = 0;
-    for (let l = 255; l >= 0; l--) { acc += hist[l]; if (acc > clip) { hiV = l; break; } }
-    const range = Math.max(30, hiV - lo) / 255;
+    for (let l = 255; l >= 0; l--) { acc += hist[l]; if (acc > clip) { hi = l; break; } }
+    const range = Math.max(30, hi - lo) / 255;
     const loN = lo / 255;
-
-    // additive blending eats midtones: stretch, gamma-lift, boost
     const GAMMA = 0.65, BOOST = 1.35, FLOOR = 0.04;
     function px(v) {
       let c = (v / 255 - loN) / range;
@@ -246,24 +247,41 @@
       return Math.min(1, Math.pow(c, GAMMA) * BOOST + FLOOR);
     }
 
-    // equirectangular mapping: longitude -> u, latitude -> v.
-    // The photo appears on the front and wraps around the back mirrored,
-    // so there is no ugly seam while the globe rotates.
+    // panel size in view
+    let planeW = 2.5;
+    planeH = planeW / aspect;
+    if (planeH > 2.05) { planeH = 2.05; planeW = planeH * aspect; }
+    if (planeW > 2.6) { planeW = 2.6; planeH = planeW / aspect; }
+
+    // shuffled particle->pixel assignment: the morph crosses and mixes mid-air
+    const perm = new Uint32Array(COUNT);
+    for (let i = 0; i < COUNT; i++) perm[i] = i;
+    for (let i = COUNT - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      const tswap = perm[i]; perm[i] = perm[j]; perm[j] = tswap;
+    }
+
+    const DEPTH = 0.55; // how far bright pixels float toward the viewer
     for (let i = 0; i < COUNT; i++) {
+      const cell = perm[i] % (cols * rows);
+      const cx = cell % cols;
+      const cy = (cell / cols) | 0;
+      const u = (cx + 0.5) / cols;
+      const v = (cy + 0.5) / rows;
+      const p4 = cell * 4;
+      const rr = data[p4] / 255, gg = data[p4 + 1] / 255, bb = data[p4 + 2] / 255;
+      const lum = 0.2126 * rr + 0.7152 * gg + 0.0722 * bb;
+
       const ix = i * 3;
-      const dx = dirs[ix], dy = dirs[ix + 1], dz = dirs[ix + 2];
-      let lon = Math.atan2(dx, dz) / Math.PI;     // -1..1, 0 = front center
-      let u = Math.abs(lon);                       // mirror wrap, seamless
-      let v = Math.acos(Math.max(-1, Math.min(1, dy))) / Math.PI; // 0 top
-      const sx = Math.min(S - 1, (u * (S - 1)) | 0);
-      const sy = Math.min(S - 1, (v * (S - 1)) | 0);
-      const p4 = (sy * S + sx) * 4;
-      const r = data[p4] / 255, g = data[p4 + 1] / 255, b = data[p4 + 2] / 255;
-      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      imgPos[ix] = (u - 0.5) * planeW;
+      imgPos[ix + 1] = (0.5 - v) * planeH;
+      // depth map: bright = close, dark = far (relief like a 3D bust)
+      imgPos[ix + 2] = (Math.pow(lum, 1.15) - 0.35) * DEPTH;
       imgCol[ix] = px(data[p4]);
       imgCol[ix + 1] = px(data[p4 + 1]);
       imgCol[ix + 2] = px(data[p4 + 2]);
-      imgRel[i] = (lum - 0.5); // -0.5..0.5 relief
+      imgLum[i] = lum;
+      imgBandX[i] = Math.min(BANDS - 1, (u * BANDS) | 0);
     }
     hasImage = true;
   }
@@ -272,6 +290,7 @@
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2(10, 10);
   const hitSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), RADIUS);
+  const flatPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
   const hitPoint = new THREE.Vector3();
   const localHit = new THREE.Vector3();
   const tmp = new THREE.Vector3();
@@ -436,7 +455,6 @@
     fileInput.value = '';
   });
 
-  // --- Demo: bundled track (original music by the app author) ---
   const DEMO_URL = './demo/stay-in-the-loop.mp3';
   const DEMO_NAME = 'stay in the loop (demo)';
   btnDemo.addEventListener('click', async () => {
@@ -474,10 +492,7 @@
     setLabel('<span class="live">&#9654;</span> ' + DEMO_NAME);
   });
 
-  // --- Photo button ---
-  // No image yet: tap opens the picker.
-  // Image loaded: tap toggles the photo skin on/off (Calm & Swarm keep working).
-  // Double-tap: pick a different image.
+  // --- Hologram button: pick / toggle / double-tap to change image ---
   let lastPhotoTap = 0;
   btnPhoto.addEventListener('click', () => {
     const now = performance.now();
@@ -489,7 +504,7 @@
     }
     photoOn = !photoOn;
     btnPhoto.classList.toggle('active', photoOn);
-    if (photoOn) photoReveal = 0; // restart the sparkle dissolve
+    if (photoOn) photoReveal = 0;
   });
   imageInput.addEventListener('change', async () => {
     const file = imageInput.files[0];
@@ -500,7 +515,7 @@
       photoOn = true;
       photoReveal = 0;
       btnPhoto.classList.add('active');
-      setLabel('photo skin &middot; double-tap &#128247; to change');
+      setLabel('hologram &middot; double-tap &#128247; to change');
     } catch (e) {
       setLabel('could not read that image');
     }
@@ -560,7 +575,7 @@
   }
 
   // ============ MODES ============
-  let modeTarget = 0; // 0 = Calm, 1 = Swarm — both work with the photo skin
+  let modeTarget = 0; // 0 = Calm, 1 = Swarm — both shape the hologram too
   function setMode(m) {
     modeTarget = m;
     btnCalm.classList.toggle('active', m === 0);
@@ -579,9 +594,15 @@
     updateAudio();
 
     agitation += (modeTarget - agitation) * 0.04;
-    photoSkin += ((photoOn ? 1 : 0) - photoSkin) * 0.045;
+    photoSkin += ((photoOn ? 1 : 0) - photoSkin) * 0.03;
+    if (photoSkin < 0.001) photoSkin = 0;
     if (photoReveal < 1) photoReveal = Math.min(1, photoReveal + 0.012);
     touchHeat *= 0.96;
+
+    const ps = photoSkin;
+    const sw = 1 - ps;
+    // mid-morph turbulence: decomposed, mixed, recomposed
+    const scramble = ps * (1 - ps) * 4;
 
     const audioResp = 0.35 + 0.65 * agitation;
     const audioEnergy = (audioMode !== 'none')
@@ -589,14 +610,23 @@
       : 0;
     const energy = Math.min(1, agitation * 0.85 + touchHeat * 0.6 + audioEnergy);
 
-    group.rotation.y += driftSpeed * (1 + audioEnergy * 4) + velY;
+    // rotation: drift on the sphere; the hologram eases back to face you
+    group.rotation.y += driftSpeed * (1 + audioEnergy * 4) * sw + velY;
     group.rotation.x += velX;
+    if (ps > 0.2) {
+      const ry = group.rotation.y;
+      group.rotation.y += (Math.round(ry / TWO_PI) * TWO_PI - ry) * 0.04 * ps;
+      group.rotation.x += (0 - group.rotation.x) * 0.04 * ps;
+    }
     velX *= 0.92; velY *= 0.92;
 
     hasHit = false;
     if (ndc.x < 5) {
       raycaster.setFromCamera(ndc, camera);
-      if (raycaster.ray.intersectSphere(hitSphere, hitPoint)) {
+      const ok = ps > 0.5
+        ? raycaster.ray.intersectPlane(flatPlane, hitPoint)
+        : raycaster.ray.intersectSphere(hitSphere, hitPoint);
+      if (ok) {
         inv.copy(group.matrixWorld).invert();
         localHit.copy(hitPoint).applyMatrix4(inv);
         hasHit = true;
@@ -609,61 +639,100 @@
       + beat * 0.07 * audioResp;
     const specAmp = (0.16 + 0.26 * agitation) + beat * 0.12 * agitation;
     const heatResp = 0.35 + 0.65 * agitation;
-    // the photo relief pumps with the bass and softens in full swarm
-    const reliefAmp = photoSkin * (0.10 + bass * 0.18) * (1 - agitation * 0.4);
+
+    // hologram dynamics
+    const depthPulse = 1 + bass * 0.9 + beat * 0.35;          // bass pumps the relief
+    const hover = Math.sin(t * 0.9) * 0.02 * (1 - agitation);  // gentle float in Calm
+    const frayAmp = agitation * 0.22 + audioEnergy * agitation * 0.10;
+    const specZ = (audioMode !== 'none') ? 0.12 : 0;           // spectrum ripples the depth
+    const scanY = ((t * 0.45) % 2.6 - 1.3) * (planeH * 0.75);  // scanline sweep
     const photoBeatLum = 1 + (beat * 0.5 + level * 0.25) * (audioMode !== 'none' ? 1 : 0);
 
-    // bigger points when the photo skin is on: more light, more detail
-    const baseSize = isSmall ? 0.016 : 0.013;
-    material.size = baseSize * (1 + photoSkin * 0.75);
+    // bigger points when the hologram is on: more light, more detail
+    material.size = BASE_SIZE * (1 + ps * 0.9);
 
     for (let i = 0; i < COUNT; i++) {
       const ix = i * 3;
       const dx = dirs[ix], dy = dirs[ix + 1], dz = dirs[ix + 2];
 
+      // --- sphere target ---
       const n = Math.sin(t * 2.0 * freq[i] + phase[i]);
       let r = RADIUS * breathe + n * jitterAmp;
-      const sv = spectrum[band[i]];
-      r += sv * specAmp * (0.5 + 0.5 * Math.sin(phase[i] + t * 3));
-      r += imgRel[i] * reliefAmp; // the photo gains real depth
+      const svS = spectrum[band[i]];
+      r += svS * specAmp * (0.5 + 0.5 * Math.sin(phase[i] + t * 3));
+      const sx = dx * r, sy = dy * r, sz = dz * r;
 
+      // --- hologram target ---
+      const lum = imgLum[i];
+      let hx = imgPos[ix];
+      let hy = imgPos[ix + 1] + hover;
+      let hz = imgPos[ix + 2] * depthPulse + spectrum[imgBandX[i]] * specZ;
+      if (frayAmp > 0.005) {
+        // Swarm frays the hologram: shadows fly, bright structure holds
+        const fa = frayAmp * (0.12 + 0.88 * (1 - lum));
+        hx += Math.sin(t * 5.1 * freq[i] + phase[i]) * fa;
+        hy += Math.sin(t * 4.3 * freq[i] + phase[i] * 1.7) * fa;
+        hz += Math.cos(t * 3.7 * freq[i] + phase[i] * 2.3) * fa * 0.6;
+      }
+
+      // --- blend + mid-flight scramble ---
+      let X = sx * sw + hx * ps;
+      let Y = sy * sw + hy * ps;
+      let Z = sz * sw + hz * ps;
+      if (scramble > 0.01) {
+        const s2 = scramble * 0.30;
+        X += Math.sin(t * 7.0 * freq[i] + phase[i]) * s2;
+        Y += Math.sin(t * 6.3 * freq[i] + phase[i] * 1.7) * s2;
+        Z += Math.cos(t * 5.1 * freq[i] + phase[i] * 2.3) * s2;
+      }
+
+      // --- touch ---
       let heat = 0;
       if (hasHit) {
-        tmp.set(dx, dy, dz);
+        tmp.set(
+          dx * sw + imgPos[ix] * ps,
+          dy * sw + imgPos[ix + 1] * ps,
+          dz * sw + imgPos[ix + 2] * ps
+        );
         const d = tmp.distanceTo(localHit);
         if (d < 0.55) {
           const f = (1 - d / 0.55) * (1 - d / 0.55);
-          r += f * 0.28 * (0.4 + touchHeat);
+          const push = f * 0.28 * (0.4 + touchHeat);
+          if (ps > 0.5) {
+            Z += push; // hologram: pixels pop toward you
+          } else {
+            X += dx * push; Y += dy * push; Z += dz * push;
+          }
           heat = f;
         }
       }
 
-      positions[ix] = dx * r;
-      positions[ix + 1] = dy * r;
-      positions[ix + 2] = dz * r;
+      positions[ix] = X;
+      positions[ix + 1] = Y;
+      positions[ix + 2] = Z;
 
-      // --- procedural color (gold / orange) ---
-      const local = Math.min(1, Math.abs(n) * energy * 1.4 + heat + sv * 1.2 * heatResp);
+      // --- procedural color (gold / orange sphere) ---
+      const local = Math.min(1, Math.abs(n) * energy * 1.4 + heat + svS * 1.2 * heatResp);
       const mixHot = Math.min(1, Math.max(energy * 0.85, local) + beat * 0.3 * heatResp);
       const flick = 0.5 + 0.5 * Math.sin(t * (3 + highs * 14) * freq[i] + phase[i] * 2);
       let cr = calm.r + (hotA.r + (hotB.r - hotA.r) * flick - calm.r) * mixHot;
       let cg = calm.g + (hotA.g + (hotB.g - hotA.g) * flick - calm.g) * mixHot;
       let cb = calm.b + (hotA.b + (hotB.b - hotA.b) * flick - calm.b) * mixHot;
-      const lum = (0.6 + 0.4 * (0.4 + 0.6 * flick) * (0.5 + 0.5 * mixHot))
+      const lumP = (0.6 + 0.4 * (0.4 + 0.6 * flick) * (0.5 + 0.5 * mixHot))
         * (1 + beat * 0.35 * audioResp);
-      cr *= lum; cg *= lum; cb *= lum;
+      cr *= lumP; cg *= lumP; cb *= lumP;
 
-      // --- photo skin: per-particle sparkle dissolve, then live shimmer ---
-      // each particle joins the picture at its own moment (phase-staggered)
-      let s = photoSkin;
-      if (photoSkin > 0.001 && photoReveal < 1) {
-        const stagger = phase[i] / (Math.PI * 2); // 0..1
+      // --- hologram color: photo pixels + scanline + heat flare ---
+      let s = ps;
+      if (ps > 0.001 && photoReveal < 1) {
+        const stagger = phase[i] / TWO_PI;
         s *= Math.max(0, Math.min(1, (photoReveal * 1.6 - stagger) * 2.5));
       }
       if (s > 0.001) {
-        // in Swarm the photo burns: pixels lean toward the hot palette
-        const burn = agitation * Math.min(1, mixHot + sv) * 0.45;
-        const shimmer = (0.95 + 0.12 * flick) * photoBeatLum + heat * 1.1;
+        const scan = 1 + 0.5 * Math.max(0, 1 - Math.abs(imgPos[ix + 1] - scanY) * 5);
+        // in Swarm the frayed shadows glow hot, the picture itself stays true
+        const burn = agitation * (1 - lum) * 0.5;
+        const shimmer = (0.96 + 0.10 * flick) * photoBeatLum * scan + heat * 1.2;
         const pr = (imgCol[ix] * (1 - burn) + cr * burn) * shimmer;
         const pg = (imgCol[ix + 1] * (1 - burn) + cg * burn) * shimmer;
         const pb = (imgCol[ix + 2] * (1 - burn) + cb * burn) * shimmer;
