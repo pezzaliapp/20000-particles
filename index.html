@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 <title>20000 Particles</title>
-<meta name="description" content="An interactive sphere of 20,000 glowing particles that reacts to your music and your voice." />
+<meta name="description" content="An interactive sphere of 20,000 glowing particles that reacts to your music, your voice and your photos." />
 <meta name="theme-color" content="#000000" />
 <link rel="manifest" href="./manifest.json" />
 <link rel="icon" href="./icons/icon-192.png" />
@@ -36,9 +36,24 @@
     z-index: 2;
   }
   .title { color: #e8e2d6; font-size: 15px; font-weight: 600; letter-spacing: 0.02em; }
-  .sub { color: #5c5c5c; font-size: 11px; margin-top: 4px; }
+  .sub { color: #5c5c5c; font-size: 11px; margin-top: 4px; display: flex; align-items: center; gap: 8px; }
   .sub .live { color: #f5c97a; }
   .hint { color: #5c5c5c; font-size: 11px; text-align: right; line-height: 1.5; }
+
+  #vu {
+    width: 46px; height: 4px;
+    border-radius: 2px;
+    background: #1c1c1c;
+    overflow: hidden;
+    display: none;
+  }
+  #vu.on { display: block; }
+  #vuFill {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, #f5c97a, #ff6a21);
+    border-radius: 2px;
+    transition: width 60ms linear;
+  }
 
   nav {
     position: fixed;
@@ -71,7 +86,7 @@
     color: #f5c97a;
   }
   button.mode:focus-visible { outline: 2px solid #f5c97a; outline-offset: 2px; }
-  #fileInput { display: none; }
+  #fileInput, #imageInput { display: none; }
 </style>
 </head>
 <body>
@@ -80,7 +95,10 @@
 <header>
   <div>
     <div class="title">20000 Particles</div>
-    <div class="sub" id="sourceLabel">count = 20000 &middot; THREE.Points</div>
+    <div class="sub">
+      <span id="sourceLabel">count = 20000 &middot; THREE.Points</span>
+      <span id="vu"><span id="vuFill"></span></span>
+    </div>
   </div>
   <div class="hint">drag to rotate<br/>touch to heat</div>
 </header>
@@ -88,10 +106,13 @@
 <nav>
   <button class="mode active" id="btnCalm">Calm</button>
   <button class="mode" id="btnSwarm">Swarm</button>
+  <button class="mode" id="btnPhoto">&#128247; Photo</button>
   <button class="mode" id="btnMic">&#127908; Mic</button>
   <button class="mode" id="btnTrack">&#9835; Track</button>
+  <button class="mode" id="btnDemo">&#9658; Demo</button>
 </nav>
 <input type="file" id="fileInput" accept="audio/*" />
+<input type="file" id="imageInput" accept="image/*" />
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -101,6 +122,7 @@
   const isSmall = Math.min(window.innerWidth, window.innerHeight) < 700;
   const COUNT = isSmall ? 9000 : 20000;
   const RADIUS = 1;
+  const TWO_PI = Math.PI * 2;
 
   // ============ SCENE ============
   const scene = new THREE.Scene();
@@ -124,8 +146,7 @@
   ctx.fillRect(0, 0, 64, 64);
   const sprite = new THREE.CanvasTexture(cnv);
 
-  // Fibonacci sphere + per-particle frequency band (by latitude:
-  // bass at the equator, treble at the poles — a 3D equalizer)
+  // Fibonacci sphere; each particle owns a frequency band by latitude
   const dirs = new Float32Array(COUNT * 3);
   const phase = new Float32Array(COUNT);
   const freq = new Float32Array(COUNT);
@@ -167,10 +188,82 @@
   const hotA = new THREE.Color(1.0, 0.42, 0.13);
   const hotB = new THREE.Color(1.0, 0.72, 0.35);
 
+  // ============ PHOTO ============
+  // The image is decomposed: particles are assigned to pixels in SHUFFLED
+  // order, so during the morph they cross and mix mid-air before
+  // recomposing the picture, pixel colors and a luminance relief included.
+  const imgPos = new Float32Array(COUNT * 3);   // target positions on the image plane
+  const imgCol = new Float32Array(COUNT * 3);   // pixel colors
+  const imgBand = new Uint8Array(COUNT);        // frequency band by image column
+  let hasImage = false;
+  let photoMix = 0;
+
+  async function loadImageFile(file) {
+    let bmp;
+    try {
+      bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    } catch (e) {
+      bmp = await new Promise((res, rej) => {
+        const im = new Image();
+        im.onload = () => res(im);
+        im.onerror = rej;
+        im.src = URL.createObjectURL(file);
+      });
+    }
+    const aspect = bmp.width / bmp.height;
+
+    // grid of ~COUNT cells matching the image aspect
+    let cols = Math.round(Math.sqrt(COUNT * aspect));
+    let rows = Math.ceil(COUNT / cols);
+
+    const sc = document.createElement('canvas');
+    sc.width = cols; sc.height = rows;
+    const sctx = sc.getContext('2d', { willReadFrequently: true });
+    sctx.drawImage(bmp, 0, 0, cols, rows);
+    const data = sctx.getImageData(0, 0, cols, rows).data;
+    if (bmp.close) bmp.close();
+
+    // fit the plane in view
+    let planeW = 2.6, planeH = planeW / aspect;
+    if (planeH > 2.1) { planeH = 2.1; planeW = planeH * aspect; }
+
+    // shuffled assignment particle -> pixel ("mescolato")
+    const perm = new Uint32Array(COUNT);
+    for (let i = 0; i < COUNT; i++) perm[i] = i;
+    for (let i = COUNT - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      const t = perm[i]; perm[i] = perm[j]; perm[j] = t;
+    }
+
+    for (let i = 0; i < COUNT; i++) {
+      const cell = perm[i] % (cols * rows);
+      const cx = cell % cols;
+      const cy = (cell / cols) | 0;
+      const u = (cx + 0.5) / cols;
+      const v = (cy + 0.5) / rows;
+      const p4 = cell * 4;
+      const r = data[p4] / 255, g = data[p4 + 1] / 255, b = data[p4 + 2] / 255;
+      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+      const ix = i * 3;
+      imgPos[ix] = (u - 0.5) * planeW;
+      imgPos[ix + 1] = (0.5 - v) * planeH;
+      imgPos[ix + 2] = (lum - 0.5) * 0.22; // luminance relief
+      // slight lift so dark pixels still glow faintly
+      imgCol[ix] = Math.min(1, r * 1.15 + 0.02);
+      imgCol[ix + 1] = Math.min(1, g * 1.15 + 0.02);
+      imgCol[ix + 2] = Math.min(1, b * 1.15 + 0.02);
+      // spectrogram mapping: bass on the left, treble on the right
+      imgBand[i] = Math.min(BANDS - 1, (u * BANDS) | 0);
+    }
+    hasImage = true;
+  }
+
   // ============ POINTER ============
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2(10, 10);
   const hitSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), RADIUS);
+  const flatPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
   const hitPoint = new THREE.Vector3();
   const localHit = new THREE.Vector3();
   const tmp = new THREE.Vector3();
@@ -207,75 +300,96 @@
   });
 
   // ============ AUDIO ============
-  let audioCtx = null, analyser = null, fftData = null;
+  let audioCtx = null, analyser = null, outGain = null;
+  let fftData = null, waveData = null;
   let micStream = null, micSource = null;
   let audioEl = null, trackSource = null;
-  let audioMode = 'none'; // 'none' | 'mic' | 'track'
-  const spectrum = new Float32Array(BANDS);  // smoothed bands 0..1
+  let audioMode = 'none';
+  const spectrum = new Float32Array(BANDS);
   let level = 0, bass = 0, highs = 0;
-  let bassAvg = 0.01, beat = 0;
+  let bassAvg = 0.02, beat = 0;
+  let autoGain = 1, runningMax = 0.08;
 
   const sourceLabel = document.getElementById('sourceLabel');
+  const vu = document.getElementById('vu');
+  const vuFill = document.getElementById('vuFill');
   const btnCalm = document.getElementById('btnCalm');
   const btnSwarm = document.getElementById('btnSwarm');
+  const btnPhoto = document.getElementById('btnPhoto');
   const btnMic = document.getElementById('btnMic');
   const btnTrack = document.getElementById('btnTrack');
+  const btnDemo = document.getElementById('btnDemo');
   const fileInput = document.getElementById('fileInput');
+  const imageInput = document.getElementById('imageInput');
 
   function ensureCtx() {
     if (!audioCtx) {
       const AC = window.AudioContext || window.webkitAudioContext;
       audioCtx = new AC();
       analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 512;
-      analyser.smoothingTimeConstant = 0.75;
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.7;
       fftData = new Uint8Array(analyser.frequencyBinCount);
+      waveData = new Uint8Array(analyser.fftSize);
+      outGain = audioCtx.createGain();
+      outGain.gain.value = 0;
+      analyser.connect(outGain);
+      outGain.connect(audioCtx.destination);
     }
     if (audioCtx.state === 'suspended') audioCtx.resume();
+    return Promise.resolve();
   }
 
   function setLabel(html) { sourceLabel.innerHTML = html; }
 
   function stopMic() {
     if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
-    if (micSource) { micSource.disconnect(); micSource = null; }
-  }
-  function stopTrack() {
-    if (audioEl) { audioEl.pause(); }
+    if (micSource) { try { micSource.disconnect(); } catch (e) {} micSource = null; }
   }
   function deactivateAudio() {
-    stopMic(); stopTrack();
+    stopMic();
+    if (audioEl) audioEl.pause();
+    if (outGain) outGain.gain.value = 0;
     audioMode = 'none';
+    runningMax = 0.08;
     btnMic.classList.remove('active');
     btnTrack.classList.remove('active');
+    btnDemo.classList.remove('active');
+    vu.classList.remove('on');
     setLabel('count = 20000 &middot; THREE.Points');
   }
 
-  // --- Mic: voice, claps, any rhythm you give it ---
   btnMic.addEventListener('click', async () => {
     if (audioMode === 'mic') { deactivateAudio(); return; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setLabel('mic not available in this browser');
+      return;
+    }
     try {
-      ensureCtx();
-      stopTrack();
+      await ensureCtx();
+      if (audioEl) audioEl.pause();
       btnTrack.classList.remove('active');
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true }
-      });
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micSource = audioCtx.createMediaStreamSource(micStream);
-      micSource.connect(analyser); // not connected to output: no feedback
+      micSource.connect(analyser);
+      outGain.gain.value = 0;
       audioMode = 'mic';
+      runningMax = 0.05;
       btnMic.classList.add('active');
-      setLabel('<span class="live">&#9679; live</span> &middot; listening to mic');
+      vu.classList.add('on');
+      setLabel('<span class="live">&#9679; live</span> &middot; listening');
     } catch (err) {
-      setLabel('mic access denied &middot; check permissions');
+      setLabel('mic blocked &middot; allow it in browser settings');
     }
   });
 
-  // --- Track: load an audio file from the device ---
-  btnTrack.addEventListener('click', () => {
-    if (audioMode === 'track' && audioEl) {
+  let trackName = '';
+  let isDemo = false;
+  btnTrack.addEventListener('click', async () => {
+    if (audioMode === 'track' && audioEl && !isDemo) {
       if (audioEl.paused) {
-        ensureCtx(); audioEl.play();
+        await ensureCtx();
+        audioEl.play().catch(() => {});
         setLabel('<span class="live">&#9654;</span> ' + trackName);
       } else {
         audioEl.pause();
@@ -286,11 +400,10 @@
     fileInput.click();
   });
 
-  let trackName = '';
-  fileInput.addEventListener('change', () => {
+  fileInput.addEventListener('change', async () => {
     const file = fileInput.files[0];
     if (!file) return;
-    ensureCtx();
+    await ensureCtx();
     stopMic();
     btnMic.classList.remove('active');
     if (!audioEl) {
@@ -298,16 +411,80 @@
       audioEl.loop = true;
       trackSource = audioCtx.createMediaElementSource(audioEl);
       trackSource.connect(analyser);
-      analyser.connect(audioCtx.destination); // hear the track
     }
-    if (audioEl.src) URL.revokeObjectURL(audioEl.src);
+    if (audioEl.src && audioEl.src.startsWith('blob:')) URL.revokeObjectURL(audioEl.src);
     audioEl.src = URL.createObjectURL(file);
-    audioEl.play();
+    outGain.gain.value = 1;
+    audioEl.play().catch(() => { setLabel('tap Track to start playback'); });
     audioMode = 'track';
-    trackName = file.name.length > 28 ? file.name.slice(0, 25) + '…' : file.name;
+    isDemo = false;
+    btnDemo.classList.remove('active');
+    runningMax = 0.15;
+    trackName = file.name.length > 26 ? file.name.slice(0, 23) + '…' : file.name;
     btnTrack.classList.add('active');
+    vu.classList.add('on');
     setLabel('<span class="live">&#9654;</span> ' + trackName);
     fileInput.value = '';
+  });
+
+  // --- Demo: bundled track (EP-133 K.O. — "stay in the loop", by the app author) ---
+  const DEMO_URL = './demo/stay-in-the-loop.mp3';
+  const DEMO_NAME = 'stay in the loop (demo)';
+  btnDemo.addEventListener('click', async () => {
+    if (audioMode === 'track' && isDemo && audioEl) {
+      if (audioEl.paused) {
+        await ensureCtx();
+        audioEl.play().catch(() => {});
+        setLabel('<span class="live">&#9654;</span> ' + DEMO_NAME);
+      } else {
+        audioEl.pause();
+        setLabel('&#10074;&#10074; paused &middot; tap Demo to resume');
+      }
+      return;
+    }
+    await ensureCtx();
+    stopMic();
+    btnMic.classList.remove('active');
+    if (!audioEl) {
+      audioEl = new Audio();
+      audioEl.loop = true;
+      trackSource = audioCtx.createMediaElementSource(audioEl);
+      trackSource.connect(analyser);
+    }
+    if (audioEl.src && audioEl.src.startsWith('blob:')) URL.revokeObjectURL(audioEl.src);
+    audioEl.src = DEMO_URL;
+    outGain.gain.value = 1;
+    audioEl.play().catch(() => { setLabel('tap Demo to start playback'); });
+    audioMode = 'track';
+    isDemo = true;
+    runningMax = 0.15;
+    trackName = DEMO_NAME;
+    btnDemo.classList.add('active');
+    btnTrack.classList.remove('active');
+    vu.classList.add('on');
+    setLabel('<span class="live">&#9654;</span> ' + DEMO_NAME);
+  });
+
+  // --- Photo button: no image -> pick; has image -> show it; showing -> pick a new one
+  btnPhoto.addEventListener('click', () => {
+    if (!hasImage || modeTarget === 2) {
+      imageInput.click();
+    } else {
+      setMode(2);
+    }
+  });
+  imageInput.addEventListener('change', async () => {
+    const file = imageInput.files[0];
+    if (!file) return;
+    setLabel('decomposing image…');
+    try {
+      await loadImageFile(file);
+      setMode(2);
+      setLabel('20000 pixels &middot; ' + (file.name.length > 22 ? file.name.slice(0, 19) + '…' : file.name));
+    } catch (e) {
+      setLabel('could not read that image');
+    }
+    imageInput.value = '';
   });
 
   function updateAudio() {
@@ -316,48 +493,60 @@
       for (let b = 0; b < BANDS; b++) spectrum[b] *= 0.93;
       return;
     }
-    if (audioMode === 'mic' && !micSource) return;
     analyser.getByteFrequencyData(fftData);
-    const bins = fftData.length; // 256
-    const useful = Math.floor(bins * 0.7); // skip the silent top end
+    analyser.getByteTimeDomainData(waveData);
 
-    // band energies mapped onto the sphere's latitudes
-    let sum = 0;
+    let rms = 0;
+    for (let i = 0; i < waveData.length; i += 4) {
+      const v = (waveData[i] - 128) / 128;
+      rms += v * v;
+    }
+    rms = Math.sqrt(rms / (waveData.length / 4));
+
+    runningMax = Math.max(runningMax * 0.997, rms, 0.02);
+    autoGain = 1 / runningMax;
+    const lvl = Math.min(1, rms * autoGain);
+    level += (lvl - level) * 0.25;
+
+    const bins = fftData.length;
+    const useful = Math.floor(bins * 0.55);
+    const fGain = Math.min(6, autoGain * 0.9);
+
     for (let b = 0; b < BANDS; b++) {
       const i0 = Math.floor((b / BANDS) * useful);
-      const i1 = Math.floor(((b + 1) / BANDS) * useful);
+      const i1 = Math.max(i0 + 1, Math.floor(((b + 1) / BANDS) * useful));
       let s = 0;
       for (let i = i0; i < i1; i++) s += fftData[i];
-      const v = s / ((i1 - i0) * 255);
-      spectrum[b] += (v - spectrum[b]) * 0.35; // smooth
-      sum += v;
+      let v = (s / ((i1 - i0) * 255)) * fGain;
+      v = Math.min(1, v * v * 1.6);
+      spectrum[b] += (v - spectrum[b]) * 0.35;
     }
-    const lvl = sum / BANDS;
-    level += (lvl - level) * 0.2;
 
-    // bass (kick) and highs (sparkle)
     let bs = 0;
-    for (let i = 1; i < 8; i++) bs += fftData[i];
-    bs /= 7 * 255;
+    for (let i = 1; i < 16; i++) bs += fftData[i];
+    bs = Math.min(1, (bs / (15 * 255)) * fGain);
     bass += (bs - bass) * 0.3;
 
     let hs = 0;
-    for (let i = 60; i < 160; i++) hs += fftData[i];
-    hs /= 100 * 255;
+    for (let i = 120; i < 320; i++) hs += fftData[i];
+    hs = Math.min(1, (hs / (200 * 255)) * fGain * 1.5);
     highs += (hs - highs) * 0.25;
 
-    // simple beat detection: bass spike above its running average
     bassAvg += (bs - bassAvg) * 0.02;
-    if (bs > bassAvg * 1.5 && bs > 0.18 && beat < 0.3) beat = 1;
+    if (bs > bassAvg * 1.4 && bs > 0.25 && beat < 0.3) beat = 1;
     beat *= 0.88;
+
+    vuFill.style.width = Math.round(level * 100) + '%';
   }
 
   // ============ MODES ============
+  // 0 = Calm (golden sphere), 1 = Swarm (orange chaos), 2 = Photo
   let modeTarget = 0;
   function setMode(m) {
     modeTarget = m;
     btnCalm.classList.toggle('active', m === 0);
     btnSwarm.classList.toggle('active', m === 1);
+    btnPhoto.classList.toggle('active', m === 2);
   }
   btnCalm.addEventListener('click', () => setMode(0));
   btnSwarm.addEventListener('click', () => setMode(1));
@@ -371,21 +560,39 @@
 
     updateAudio();
 
-    agitation += (modeTarget - agitation) * 0.04;
+    agitation += ((modeTarget === 1 ? 1 : 0) - agitation) * 0.04;
+    photoMix += ((modeTarget === 2 ? 1 : 0) - photoMix) * 0.022;
+    if (photoMix < 0.001) photoMix = 0;
     touchHeat *= 0.96;
-    const audioOn = audioMode !== 'none';
-    const audioEnergy = audioOn ? Math.min(1, level * 2.2 + beat * 0.5) : 0;
-    const energy = Math.min(1, agitation + touchHeat * 0.6 + audioEnergy * 0.9);
 
-    // rotation: drag inertia + slow drift, faster when the music drives it
-    group.rotation.y += driftSpeed * (1 + audioEnergy * 4) + velY;
+    // mid-morph turbulence: the image is torn apart / mixed in flight
+    const scramble = photoMix * (1 - photoMix) * 4; // bell curve, peak = 1
+    const sphereW = 1 - photoMix;
+
+    const audioResp = 0.35 + 0.65 * Math.max(agitation, photoMix * 0.6);
+    const audioEnergy = (audioMode !== 'none')
+      ? Math.min(1, (level * 1.6 + beat * 0.5) * audioResp)
+      : 0;
+    const energy = Math.min(1, agitation * 0.85 + touchHeat * 0.6 + audioEnergy) * (1 - photoMix * 0.6);
+
+    // rotation: drift on the sphere; ease flat when the photo recomposes
+    group.rotation.y += driftSpeed * (1 + audioEnergy * 4) * sphereW + velY;
     group.rotation.x += velX;
+    if (photoMix > 0.2) {
+      const ry = group.rotation.y;
+      group.rotation.y += (Math.round(ry / TWO_PI) * TWO_PI - ry) * 0.06 * photoMix;
+      group.rotation.x += (0 - group.rotation.x) * 0.06 * photoMix;
+    }
     velX *= 0.92; velY *= 0.92;
 
+    // pointer hit: sphere normally, flat plane in photo mode
     hasHit = false;
     if (ndc.x < 5) {
       raycaster.setFromCamera(ndc, camera);
-      if (raycaster.ray.intersectSphere(hitSphere, hitPoint)) {
+      const ok = photoMix > 0.5
+        ? raycaster.ray.intersectPlane(flatPlane, hitPoint)
+        : raycaster.ray.intersectSphere(hitSphere, hitPoint);
+      if (ok) {
         inv.copy(group.matrixWorld).invert();
         localHit.copy(hitPoint).applyMatrix4(inv);
         hasHit = true;
@@ -393,47 +600,83 @@
     }
 
     const jitterAmp = 0.05 * energy;
-    // the whole sphere breathes with the kick
-    const breathe = 1 + 0.012 * Math.sin(t * 1.4) + bass * 0.10 + beat * 0.06;
-    const specAmp = 0.30 + beat * 0.15;
+    const breathe = 1 + 0.012 * Math.sin(t * 1.4)
+      + bass * 0.12 * audioResp
+      + beat * 0.07 * audioResp;
+    const specAmp = ((0.16 + 0.26 * agitation) + beat * 0.12 * agitation) * sphereW;
+    const heatResp = 0.35 + 0.65 * agitation;
+    const reliefAmp = photoMix * (0.18 + bass * 0.5); // photo relief pumps with the bass
+    const photoLum = 1 + (beat * 0.45 + level * 0.25) * photoMix * (audioMode !== 'none' ? 1 : 0);
 
     for (let i = 0; i < COUNT; i++) {
       const ix = i * 3;
       const dx = dirs[ix], dy = dirs[ix + 1], dz = dirs[ix + 2];
 
+      // --- sphere target ---
       const n = Math.sin(t * 2.0 * freq[i] + phase[i]);
       let r = RADIUS * breathe + n * jitterAmp;
+      const svS = spectrum[band[i]];
+      r += svS * specAmp * (0.5 + 0.5 * Math.sin(phase[i] + t * 3));
+      const sx = dx * r, sy = dy * r, sz = dz * r;
 
-      // 3D equalizer: each latitude rides its own frequency band
-      const sv = spectrum[band[i]];
-      r += sv * specAmp * (0.5 + 0.5 * Math.sin(phase[i] + t * 3));
+      // --- image target (audio relief: spectrogram left->right) ---
+      const svI = spectrum[imgBand[i]];
+      const px = imgPos[ix];
+      const py = imgPos[ix + 1];
+      const pz = imgPos[ix + 2] * (1 + bass * 0.8) + svI * reliefAmp;
 
+      // --- blend + mid-flight scramble ---
+      let X = sx * sphereW + px * photoMix;
+      let Y = sy * sphereW + py * photoMix;
+      let Z = sz * sphereW + pz * photoMix;
+      if (scramble > 0.01) {
+        const s = scramble * 0.30;
+        X += Math.sin(t * 7.0 * freq[i] + phase[i]) * s;
+        Y += Math.sin(t * 6.3 * freq[i] + phase[i] * 1.7) * s;
+        Z += Math.cos(t * 5.1 * freq[i] + phase[i] * 2.3) * s;
+      }
+
+      // --- touch repulsion on the blended base position ---
       let heat = 0;
       if (hasHit) {
-        tmp.set(dx, dy, dz);
+        tmp.set(
+          dx * sphereW + px * photoMix,
+          dy * sphereW + py * photoMix,
+          dz * sphereW + pz * photoMix
+        );
         const d = tmp.distanceTo(localHit);
         if (d < 0.55) {
           const f = (1 - d / 0.55) * (1 - d / 0.55);
-          r += f * 0.28 * (0.4 + touchHeat);
+          const push = f * 0.28 * (0.4 + touchHeat);
+          if (photoMix > 0.5) {
+            Z += push; // photo: pixels pop toward the viewer
+          } else {
+            X += dx * push; Y += dy * push; Z += dz * push;
+          }
           heat = f;
         }
       }
 
-      positions[ix] = dx * r;
-      positions[ix + 1] = dy * r;
-      positions[ix + 2] = dz * r;
+      positions[ix] = X;
+      positions[ix + 1] = Y;
+      positions[ix + 2] = Z;
 
-      // color: gold -> orange with energy; highs make it sparkle
-      const local = Math.min(1, Math.abs(n) * energy * 1.4 + heat + sv * 1.2);
-      const mixHot = Math.min(1, Math.max(energy * 0.85, local) + beat * 0.3);
+      // --- procedural color (sphere) ---
+      const local = Math.min(1, Math.abs(n) * energy * 1.4 + heat + svS * 1.2 * heatResp);
+      const mixHot = Math.min(1, Math.max(energy * 0.85, local) + beat * 0.3 * heatResp);
       const flick = 0.5 + 0.5 * Math.sin(t * (3 + highs * 14) * freq[i] + phase[i] * 2);
-      const cr = calm.r + (hotA.r + (hotB.r - hotA.r) * flick - calm.r) * mixHot;
-      const cg = calm.g + (hotA.g + (hotB.g - hotA.g) * flick - calm.g) * mixHot;
-      const cb = calm.b + (hotA.b + (hotB.b - hotA.b) * flick - calm.b) * mixHot;
-      const lum = (0.55 + 0.45 * (0.4 + 0.6 * flick) * (0.5 + 0.5 * mixHot)) * (1 + beat * 0.35);
-      colors[ix] = cr * lum;
-      colors[ix + 1] = cg * lum;
-      colors[ix + 2] = cb * lum;
+      let cr = calm.r + (hotA.r + (hotB.r - hotA.r) * flick - calm.r) * mixHot;
+      let cg = calm.g + (hotA.g + (hotB.g - hotA.g) * flick - calm.g) * mixHot;
+      let cb = calm.b + (hotA.b + (hotB.b - hotA.b) * flick - calm.b) * mixHot;
+      const lum = (0.55 + 0.45 * (0.4 + 0.6 * flick) * (0.5 + 0.5 * mixHot))
+        * (1 + beat * 0.35 * audioResp);
+      cr *= lum; cg *= lum; cb *= lum;
+
+      // --- blend toward pixel color; touch makes pixels flare ---
+      const pl = photoLum + heat * 0.8;
+      colors[ix] = cr * sphereW + imgCol[ix] * pl * photoMix;
+      colors[ix + 1] = cg * sphereW + imgCol[ix + 1] * pl * photoMix;
+      colors[ix + 2] = cb * sphereW + imgCol[ix + 2] * pl * photoMix;
     }
 
     geometry.attributes.position.needsUpdate = true;

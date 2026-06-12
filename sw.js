@@ -1,10 +1,11 @@
-const CACHE = '20000-particles-v2';
+const CACHE = '20000-particles-v5';
 const ASSETS = [
   './',
   './index.html',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
+  './demo/stay-in-the-loop.mp3',
   'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js'
 ];
 
