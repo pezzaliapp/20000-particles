@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>20000 Particles</title>
+<meta name="description" content="An interactive sphere of 20,000 glowing particles that reacts to your music and your voice." />
+<meta name="theme-color" content="#000000" />
+<link rel="manifest" href="./manifest.json" />
+<link rel="icon" href="./icons/icon-192.png" />
+<link rel="apple-touch-icon" href="./icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="20000 Particles" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: #000;
+    overflow: hidden;
+    font-family: 'SF Mono', 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; touch-action: none; }
+
+  header {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    padding: calc(16px + env(safe-area-inset-top)) 22px 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    pointer-events: none;
+    z-index: 2;
+  }
+  .title { color: #e8e2d6; font-size: 15px; font-weight: 600; letter-spacing: 0.02em; }
+  .sub { color: #5c5c5c; font-size: 11px; margin-top: 4px; }
+  .sub .live { color: #f5c97a; }
+  .hint { color: #5c5c5c; font-size: 11px; text-align: right; line-height: 1.5; }
+
+  nav {
+    position: fixed;
+    bottom: calc(20px + env(safe-area-inset-bottom));
+    left: 0; right: 0;
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 0 16px;
+    z-index: 2;
+  }
+  button.mode {
+    padding: 9px 16px;
+    border-radius: 999px;
+    border: 1px solid #3a3a3a;
+    background: rgba(0,0,0,0.4);
+    color: #8a8a8a;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all .25s ease;
+    font-family: inherit;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button.mode.active {
+    border-color: #f5c97a;
+    background: rgba(245,201,122,0.12);
+    color: #f5c97a;
+  }
+  button.mode:focus-visible { outline: 2px solid #f5c97a; outline-offset: 2px; }
+  #fileInput { display: none; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<header>
+  <div>
+    <div class="title">20000 Particles</div>
+    <div class="sub" id="sourceLabel">count = 20000 &middot; THREE.Points</div>
+  </div>
+  <div class="hint">drag to rotate<br/>touch to heat</div>
+</header>
+
+<nav>
+  <button class="mode active" id="btnCalm">Calm</button>
+  <button class="mode" id="btnSwarm">Swarm</button>
+  <button class="mode" id="btnMic">&#127908; Mic</button>
+  <button class="mode" id="btnTrack">&#9835; Track</button>
+</nav>
+<input type="file" id="fileInput" accept="audio/*" />
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+  const mount = document.getElementById('stage');
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const isSmall = Math.min(window.innerWidth, window.innerHeight) < 700;
+  const COUNT = isSmall ? 9000 : 20000;
+  const RADIUS = 1;
+
+  // ============ SCENE ============
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x000000);
+  const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 10);
+  camera.position.z = 2.7;
+
+  const renderer = new THREE.WebGLRenderer({ antialias: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  mount.appendChild(renderer.domElement);
+
+  const cnv = document.createElement('canvas');
+  cnv.width = cnv.height = 64;
+  const ctx = cnv.getContext('2d');
+  const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.3, 'rgba(255,255,255,0.6)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 64, 64);
+  const sprite = new THREE.CanvasTexture(cnv);
+
+  // Fibonacci sphere + per-particle frequency band (by latitude:
+  // bass at the equator, treble at the poles — a 3D equalizer)
+  const dirs = new Float32Array(COUNT * 3);
+  const phase = new Float32Array(COUNT);
+  const freq = new Float32Array(COUNT);
+  const band = new Uint8Array(COUNT);
+  const BANDS = 48;
+  const GA = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < COUNT; i++) {
+    const y = 1 - (i / (COUNT - 1)) * 2;
+    const r = Math.sqrt(1 - y * y);
+    const th = GA * i;
+    dirs[i * 3] = Math.cos(th) * r;
+    dirs[i * 3 + 1] = y;
+    dirs[i * 3 + 2] = Math.sin(th) * r;
+    phase[i] = Math.random() * Math.PI * 2;
+    freq[i] = 0.6 + Math.random() * 1.6;
+    band[i] = Math.min(BANDS - 1, Math.floor(Math.abs(y) * BANDS));
+  }
+
+  const positions = new Float32Array(COUNT * 3);
+  const colors = new Float32Array(COUNT * 3);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  const material = new THREE.PointsMaterial({
+    size: isSmall ? 0.016 : 0.012,
+    map: sprite,
+    vertexColors: true,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
+
+  const group = new THREE.Group();
+  group.add(new THREE.Points(geometry, material));
+  scene.add(group);
+
+  const calm = new THREE.Color(1.0, 0.86, 0.58);
+  const hotA = new THREE.Color(1.0, 0.42, 0.13);
+  const hotB = new THREE.Color(1.0, 0.72, 0.35);
+
+  // ============ POINTER ============
+  const raycaster = new THREE.Raycaster();
+  const ndc = new THREE.Vector2(10, 10);
+  const hitSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), RADIUS);
+  const hitPoint = new THREE.Vector3();
+  const localHit = new THREE.Vector3();
+  const tmp = new THREE.Vector3();
+  const inv = new THREE.Matrix4();
+  let hasHit = false;
+  let touchHeat = 0;
+  let dragging = false, lastX = 0, lastY = 0, velX = 0, velY = 0;
+
+  function toNDC(e) {
+    ndc.x = (e.clientX / window.innerWidth) * 2 - 1;
+    ndc.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  }
+  renderer.domElement.addEventListener('pointerdown', (e) => {
+    dragging = true; lastX = e.clientX; lastY = e.clientY;
+    toNDC(e); touchHeat = 1;
+  });
+  renderer.domElement.addEventListener('pointermove', (e) => {
+    toNDC(e);
+    if (dragging) {
+      velY = (e.clientX - lastX) * 0.005;
+      velX = (e.clientY - lastY) * 0.005;
+      lastX = e.clientX; lastY = e.clientY;
+      touchHeat = Math.min(1, touchHeat + 0.1);
+    }
+  });
+  window.addEventListener('pointerup', () => { dragging = false; });
+  renderer.domElement.addEventListener('pointerleave', () => {
+    dragging = false; ndc.set(10, 10);
+  });
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // ============ AUDIO ============
+  let audioCtx = null, analyser = null, fftData = null;
+  let micStream = null, micSource = null;
+  let audioEl = null, trackSource = null;
+  let audioMode = 'none'; // 'none' | 'mic' | 'track'
+  const spectrum = new Float32Array(BANDS);  // smoothed bands 0..1
+  let level = 0, bass = 0, highs = 0;
+  let bassAvg = 0.01, beat = 0;
+
+  const sourceLabel = document.getElementById('sourceLabel');
+  const btnCalm = document.getElementById('btnCalm');
+  const btnSwarm = document.getElementById('btnSwarm');
+  const btnMic = document.getElementById('btnMic');
+  const btnTrack = document.getElementById('btnTrack');
+  const fileInput = document.getElementById('fileInput');
+
+  function ensureCtx() {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      audioCtx = new AC();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.75;
+      fftData = new Uint8Array(analyser.frequencyBinCount);
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }
+
+  function setLabel(html) { sourceLabel.innerHTML = html; }
+
+  function stopMic() {
+    if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+    if (micSource) { micSource.disconnect(); micSource = null; }
+  }
+  function stopTrack() {
+    if (audioEl) { audioEl.pause(); }
+  }
+  function deactivateAudio() {
+    stopMic(); stopTrack();
+    audioMode = 'none';
+    btnMic.classList.remove('active');
+    btnTrack.classList.remove('active');
+    setLabel('count = 20000 &middot; THREE.Points');
+  }
+
+  // --- Mic: voice, claps, any rhythm you give it ---
+  btnMic.addEventListener('click', async () => {
+    if (audioMode === 'mic') { deactivateAudio(); return; }
+    try {
+      ensureCtx();
+      stopTrack();
+      btnTrack.classList.remove('active');
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true }
+      });
+      micSource = audioCtx.createMediaStreamSource(micStream);
+      micSource.connect(analyser); // not connected to output: no feedback
+      audioMode = 'mic';
+      btnMic.classList.add('active');
+      setLabel('<span class="live">&#9679; live</span> &middot; listening to mic');
+    } catch (err) {
+      setLabel('mic access denied &middot; check permissions');
+    }
+  });
+
+  // --- Track: load an audio file from the device ---
+  btnTrack.addEventListener('click', () => {
+    if (audioMode === 'track' && audioEl) {
+      if (audioEl.paused) {
+        ensureCtx(); audioEl.play();
+        setLabel('<span class="live">&#9654;</span> ' + trackName);
+      } else {
+        audioEl.pause();
+        setLabel('&#10074;&#10074; paused &middot; tap Track to resume');
+      }
+      return;
+    }
+    fileInput.click();
+  });
+
+  let trackName = '';
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    ensureCtx();
+    stopMic();
+    btnMic.classList.remove('active');
+    if (!audioEl) {
+      audioEl = new Audio();
+      audioEl.loop = true;
+      trackSource = audioCtx.createMediaElementSource(audioEl);
+      trackSource.connect(analyser);
+      analyser.connect(audioCtx.destination); // hear the track
+    }
+    if (audioEl.src) URL.revokeObjectURL(audioEl.src);
+    audioEl.src = URL.createObjectURL(file);
+    audioEl.play();
+    audioMode = 'track';
+    trackName = file.name.length > 28 ? file.name.slice(0, 25) + '…' : file.name;
+    btnTrack.classList.add('active');
+    setLabel('<span class="live">&#9654;</span> ' + trackName);
+    fileInput.value = '';
+  });
+
+  function updateAudio() {
+    if (audioMode === 'none' || !analyser) {
+      level *= 0.95; bass *= 0.95; highs *= 0.95; beat *= 0.9;
+      for (let b = 0; b < BANDS; b++) spectrum[b] *= 0.93;
+      return;
+    }
+    if (audioMode === 'mic' && !micSource) return;
+    analyser.getByteFrequencyData(fftData);
+    const bins = fftData.length; // 256
+    const useful = Math.floor(bins * 0.7); // skip the silent top end
+
+    // band energies mapped onto the sphere's latitudes
+    let sum = 0;
+    for (let b = 0; b < BANDS; b++) {
+      const i0 = Math.floor((b / BANDS) * useful);
+      const i1 = Math.floor(((b + 1) / BANDS) * useful);
+      let s = 0;
+      for (let i = i0; i < i1; i++) s += fftData[i];
+      const v = s / ((i1 - i0) * 255);
+      spectrum[b] += (v - spectrum[b]) * 0.35; // smooth
+      sum += v;
+    }
+    const lvl = sum / BANDS;
+    level += (lvl - level) * 0.2;
+
+    // bass (kick) and highs (sparkle)
+    let bs = 0;
+    for (let i = 1; i < 8; i++) bs += fftData[i];
+    bs /= 7 * 255;
+    bass += (bs - bass) * 0.3;
+
+    let hs = 0;
+    for (let i = 60; i < 160; i++) hs += fftData[i];
+    hs /= 100 * 255;
+    highs += (hs - highs) * 0.25;
+
+    // simple beat detection: bass spike above its running average
+    bassAvg += (bs - bassAvg) * 0.02;
+    if (bs > bassAvg * 1.5 && bs > 0.18 && beat < 0.3) beat = 1;
+    beat *= 0.88;
+  }
+
+  // ============ MODES ============
+  let modeTarget = 0;
+  function setMode(m) {
+    modeTarget = m;
+    btnCalm.classList.toggle('active', m === 0);
+    btnSwarm.classList.toggle('active', m === 1);
+  }
+  btnCalm.addEventListener('click', () => setMode(0));
+  btnSwarm.addEventListener('click', () => setMode(1));
+
+  // ============ LOOP ============
+  let agitation = 0;
+  const driftSpeed = reduceMotion ? 0 : 0.0012;
+
+  function animate(now) {
+    const t = now * 0.001;
+
+    updateAudio();
+
+    agitation += (modeTarget - agitation) * 0.04;
+    touchHeat *= 0.96;
+    const audioOn = audioMode !== 'none';
+    const audioEnergy = audioOn ? Math.min(1, level * 2.2 + beat * 0.5) : 0;
+    const energy = Math.min(1, agitation + touchHeat * 0.6 + audioEnergy * 0.9);
+
+    // rotation: drag inertia + slow drift, faster when the music drives it
+    group.rotation.y += driftSpeed * (1 + audioEnergy * 4) + velY;
+    group.rotation.x += velX;
+    velX *= 0.92; velY *= 0.92;
+
+    hasHit = false;
+    if (ndc.x < 5) {
+      raycaster.setFromCamera(ndc, camera);
+      if (raycaster.ray.intersectSphere(hitSphere, hitPoint)) {
+        inv.copy(group.matrixWorld).invert();
+        localHit.copy(hitPoint).applyMatrix4(inv);
+        hasHit = true;
+      }
+    }
+
+    const jitterAmp = 0.05 * energy;
+    // the whole sphere breathes with the kick
+    const breathe = 1 + 0.012 * Math.sin(t * 1.4) + bass * 0.10 + beat * 0.06;
+    const specAmp = 0.30 + beat * 0.15;
+
+    for (let i = 0; i < COUNT; i++) {
+      const ix = i * 3;
+      const dx = dirs[ix], dy = dirs[ix + 1], dz = dirs[ix + 2];
+
+      const n = Math.sin(t * 2.0 * freq[i] + phase[i]);
+      let r = RADIUS * breathe + n * jitterAmp;
+
+      // 3D equalizer: each latitude rides its own frequency band
+      const sv = spectrum[band[i]];
+      r += sv * specAmp * (0.5 + 0.5 * Math.sin(phase[i] + t * 3));
+
+      let heat = 0;
+      if (hasHit) {
+        tmp.set(dx, dy, dz);
+        const d = tmp.distanceTo(localHit);
+        if (d < 0.55) {
+          const f = (1 - d / 0.55) * (1 - d / 0.55);
+          r += f * 0.28 * (0.4 + touchHeat);
+          heat = f;
+        }
+      }
+
+      positions[ix] = dx * r;
+      positions[ix + 1] = dy * r;
+      positions[ix + 2] = dz * r;
+
+      // color: gold -> orange with energy; highs make it sparkle
+      const local = Math.min(1, Math.abs(n) * energy * 1.4 + heat + sv * 1.2);
+      const mixHot = Math.min(1, Math.max(energy * 0.85, local) + beat * 0.3);
+      const flick = 0.5 + 0.5 * Math.sin(t * (3 + highs * 14) * freq[i] + phase[i] * 2);
+      const cr = calm.r + (hotA.r + (hotB.r - hotA.r) * flick - calm.r) * mixHot;
+      const cg = calm.g + (hotA.g + (hotB.g - hotA.g) * flick - calm.g) * mixHot;
+      const cb = calm.b + (hotA.b + (hotB.b - hotA.b) * flick - calm.b) * mixHot;
+      const lum = (0.55 + 0.45 * (0.4 + 0.6 * flick) * (0.5 + 0.5 * mixHot)) * (1 + beat * 0.35);
+      colors[ix] = cr * lum;
+      colors[ix + 1] = cg * lum;
+      colors[ix + 2] = cb * lum;
+    }
+
+    geometry.attributes.position.needsUpdate = true;
+    geometry.attributes.color.needsUpdate = true;
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+
+  // ============ PWA ============
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch(() => {});
+    });
+  }
+})();
+</script>
+</body>
+</html>
