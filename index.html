@@ -156,7 +156,7 @@
 
 <header>
   <div>
-    <div class="title">20000 Particles</div>
+    <div class="title">20000 Particles <span style="color:#5c5c5c;font-size:10px;font-weight:400">v12</span></div>
     <div class="sub">
       <span id="sourceLabel">count = 20000 &middot; THREE.Points</span>
       <span id="vu"><span id="vuFill"></span></span>
@@ -318,12 +318,6 @@
     for (let l = 255; l >= 0; l--) { acc += hist[l]; if (acc > clip) { hi = l; break; } }
     const range = Math.max(30, hi - lo) / 255;
     const loN = lo / 255;
-    const GAMMA = 0.65, BOOST = 1.35, FLOOR = 0.04;
-    function px(v) {
-      let c = (v / 255 - loN) / range;
-      c = Math.max(0, Math.min(1, c));
-      return Math.min(1, Math.pow(c, GAMMA) * BOOST + FLOOR);
-    }
 
     // panel size in view
     let planeW = 2.5;
@@ -331,40 +325,63 @@
     if (planeH > 2.05) { planeH = 2.05; planeW = planeH * aspect; }
     if (planeW > 2.6) { planeW = 2.6; planeH = planeW / aspect; }
 
-    // shuffled particle->pixel assignment: the morph crosses and mixes mid-air
-    const perm = new Uint32Array(COUNT);
-    for (let i = 0; i < COUNT; i++) perm[i] = i;
-    for (let i = COUNT - 1; i > 0; i--) {
-      const j = (Math.random() * (i + 1)) | 0;
-      const tswap = perm[i]; perm[i] = perm[j]; perm[j] = tswap;
-    }
-
-    // depth map: luminance, BLURRED so neighbouring pixels never tear apart
+    // ===== IMPORTANCE SAMPLING =====
+    // Particles go where the LIGHT is: bright areas get dense constellations,
+    // dark areas stay truly empty. The picture emerges from light instead of
+    // drowning in a veil of gray dust.
     const lumGrid = new Float32Array(cols * rows);
     for (let c = 0; c < cols * rows; c++) {
       const p4 = c * 4;
       lumGrid[c] = (data[p4] * 0.2126 + data[p4 + 1] * 0.7152 + data[p4 + 2] * 0.0722) / 255;
     }
+    // blurred luminance for a tear-free, subtle relief
     const lumBlur = new Float32Array(cols * rows);
     for (let yB = 0; yB < rows; yB++) {
       for (let xB = 0; xB < cols; xB++) {
-        let s = 0, c2 = 0;
+        let sB = 0, c2 = 0;
         for (let oy = -2; oy <= 2; oy++) {
           const yy = yB + oy;
           if (yy < 0 || yy >= rows) continue;
           for (let ox = -2; ox <= 2; ox++) {
             const xx = xB + ox;
             if (xx < 0 || xx >= cols) continue;
-            s += lumGrid[yy * cols + xx]; c2++;
+            sB += lumGrid[yy * cols + xx]; c2++;
           }
         }
-        lumBlur[yB * cols + xB] = s / c2;
+        lumBlur[yB * cols + xB] = sB / c2;
       }
     }
+    // sampling weights: luminance^1.6, oval vignette, tiny floor for context
+    const cum = new Float64Array(cols * rows);
+    let wTotal = 0;
+    for (let c = 0; c < cols * rows; c++) {
+      const cx2 = c % cols, cy2 = (c / cols) | 0;
+      const nx = (cx2 + 0.5) / cols - 0.5, ny = (cy2 + 0.5) / rows - 0.5;
+      const re = Math.sqrt(nx * nx * 4 + ny * ny * 4);
+      let vig = 1 - Math.max(0, (re - 0.78) / 0.32);
+      vig = Math.max(0, Math.min(1, vig)); vig *= vig;
+      wTotal += Math.pow(lumGrid[c], 1.6) * vig + 0.0035 * vig;
+      cum[c] = wTotal;
+    }
 
-    const DEPTH = 0.16; // subtle relief: presence, not distortion
+    const GAMMA = 0.7, BOOST = 1.25;
+    function px(v) {
+      let c = (v / 255 - loN) / range;
+      c = Math.max(0, Math.min(1, c));
+      return Math.min(1, Math.pow(c, GAMMA) * BOOST);
+    }
+
+    const DEPTH = 0.14;
+    const cellW = planeW / cols, cellH = planeH / rows;
     for (let i = 0; i < COUNT; i++) {
-      const cell = perm[i] % (cols * rows);
+      // draw a cell from the luminance distribution (binary search the CDF)
+      const rTarget = Math.random() * wTotal;
+      let a = 0, b2 = cols * rows - 1;
+      while (a < b2) {
+        const m = (a + b2) >> 1;
+        if (cum[m] < rTarget) a = m + 1; else b2 = m;
+      }
+      const cell = a;
       const cx = cell % cols;
       const cy = (cell / cols) | 0;
       const u = (cx + 0.5) / cols;
@@ -373,19 +390,15 @@
       const lum = lumGrid[cell];
 
       const ix = i * 3;
-      const X = (u - 0.5) * planeW;
-      const Y = (0.5 - v) * planeH;
-      imgPos[ix] = X;
-      imgPos[ix + 1] = Y;
+      // sub-pixel jitter: organic constellations, no grid pattern
+      imgPos[ix] = (u - 0.5) * planeW + (Math.random() - 0.5) * cellW * 1.2;
+      imgPos[ix + 1] = (0.5 - v) * planeH + (Math.random() - 0.5) * cellH * 1.2;
       imgPos[ix + 2] = (lumBlur[cell] - 0.45) * DEPTH;
 
-      // oval vignette: corners melt away, no hard rectangle
-      const re = Math.sqrt(
-        Math.pow(X / (planeW * 0.5), 2) + Math.pow(Y / (planeH * 0.5), 2)
-      );
-      let vig = 1 - Math.max(0, (re - 0.80) / 0.30);
+      const nx = u - 0.5, ny = v - 0.5;
+      const re = Math.sqrt(nx * nx * 4 + ny * ny * 4);
+      let vig = 1 - Math.max(0, (re - 0.78) / 0.32);
       vig = Math.max(0, Math.min(1, vig));
-      vig *= vig; // soft falloff
 
       imgCol[ix] = px(data[p4]) * vig;
       imgCol[ix + 1] = px(data[p4 + 1]) * vig;

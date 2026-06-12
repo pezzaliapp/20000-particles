@@ -1,4 +1,4 @@
-const CACHE = '20000-particles-v10';
+const CACHE = '20000-particles-v12';
 const ASSETS = [
   './',
   './index.html',
@@ -24,13 +24,31 @@ self.addEventListener('activate', (e) => {
 });
 
 self.addEventListener('fetch', (e) => {
+  const req = e.request;
+  const isHTML = req.mode === 'navigate' ||
+    (req.headers.get('accept') || '').includes('text/html');
+
+  if (isHTML) {
+    // NETWORK-FIRST for pages: updates arrive on the very first reload.
+    // The cache only serves when offline.
+    e.respondWith(
+      fetch(req).then((res) => {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put(req, copy));
+        return res;
+      }).catch(() => caches.match(req).then((c) => c || caches.match('./index.html')))
+    );
+    return;
+  }
+
+  // cache-first for static assets (icons, demo mp3, three.js)
   e.respondWith(
-    caches.match(e.request).then((cached) => {
+    caches.match(req).then((cached) => {
       if (cached) return cached;
-      return fetch(e.request).then((res) => {
-        if (e.request.method === 'GET' && res && (res.ok || res.type === 'opaque')) {
+      return fetch(req).then((res) => {
+        if (req.method === 'GET' && res && (res.ok || res.type === 'opaque')) {
           const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(e.request, copy));
+          caches.open(CACHE).then((c) => c.put(req, copy));
         }
         return res;
       });
