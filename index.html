@@ -87,6 +87,68 @@
   }
   button.mode:focus-visible { outline: 2px solid #f5c97a; outline-offset: 2px; }
   #fileInput, #imageInput { display: none; }
+
+  /* photo menu popover */
+  #photoMenu {
+    position: fixed;
+    bottom: calc(72px + env(safe-area-inset-bottom));
+    left: 0; right: 0;
+    display: none;
+    justify-content: center;
+    gap: 10px;
+    z-index: 3;
+  }
+  #photoMenu.open { display: flex; }
+
+  /* camera overlay */
+  #camOverlay {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    display: none;
+    z-index: 10;
+  }
+  #camOverlay.open { display: block; }
+  #camVideo {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  #camVideo.mirror { transform: scaleX(-1); }
+  #camBar {
+    position: absolute;
+    bottom: calc(28px + env(safe-area-inset-bottom));
+    left: 0; right: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 26px;
+    z-index: 11;
+  }
+  #camShot {
+    width: 68px; height: 68px;
+    border-radius: 50%;
+    border: 4px solid #f5c97a;
+    background: rgba(245,201,122,0.25);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #camShot:active { background: rgba(245,201,122,0.6); }
+  .camSide {
+    padding: 10px 16px;
+    border-radius: 999px;
+    border: 1px solid #555;
+    background: rgba(0,0,0,0.5);
+    color: #ccc;
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+    font-family: inherit;
+    -webkit-tap-highlight-color: transparent;
+  }
 </style>
 </head>
 <body>
@@ -113,6 +175,21 @@
 </nav>
 <input type="file" id="fileInput" accept="audio/*" />
 <input type="file" id="imageInput" accept="image/*" />
+
+<div id="photoMenu">
+  <button class="mode" id="pmLibrary">&#128193; Library</button>
+  <button class="mode" id="pmCamera">&#128248; Camera</button>
+  <button class="mode" id="pmToggle" style="display:none">&#128065; Hide</button>
+</div>
+
+<div id="camOverlay">
+  <video id="camVideo" autoplay playsinline muted></video>
+  <div id="camBar">
+    <button class="camSide" id="camCancel">Cancel</button>
+    <button id="camShot" aria-label="Take photo"></button>
+    <button class="camSide" id="camFlip">Flip</button>
+  </div>
+</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -492,20 +569,101 @@
     setLabel('<span class="live">&#9654;</span> ' + DEMO_NAME);
   });
 
-  // --- Hologram button: pick / toggle / double-tap to change image ---
-  let lastPhotoTap = 0;
-  btnPhoto.addEventListener('click', () => {
-    const now = performance.now();
-    const isDouble = now - lastPhotoTap < 350;
-    lastPhotoTap = now;
-    if (!hasImage || isDouble) {
-      imageInput.click();
-      return;
-    }
+  // --- Hologram: tap opens a small menu (Library / Camera / Show-Hide) ---
+  const photoMenu = document.getElementById('photoMenu');
+  const pmLibrary = document.getElementById('pmLibrary');
+  const pmCamera = document.getElementById('pmCamera');
+  const pmToggle = document.getElementById('pmToggle');
+  const camOverlay = document.getElementById('camOverlay');
+  const camVideo = document.getElementById('camVideo');
+  const camShot = document.getElementById('camShot');
+  const camCancel = document.getElementById('camCancel');
+  const camFlip = document.getElementById('camFlip');
+  let camStream = null;
+  let camFacing = 'user';
+
+  function closePhotoMenu() { photoMenu.classList.remove('open'); }
+  function openPhotoMenu() {
+    pmToggle.style.display = hasImage ? '' : 'none';
+    pmToggle.innerHTML = photoOn ? '&#128065; Hide' : '&#128065; Show';
+    photoMenu.classList.add('open');
+  }
+  btnPhoto.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (photoMenu.classList.contains('open')) closePhotoMenu();
+    else openPhotoMenu();
+  });
+  document.addEventListener('click', (e) => {
+    if (!photoMenu.contains(e.target) && e.target !== btnPhoto) closePhotoMenu();
+  });
+
+  pmLibrary.addEventListener('click', () => {
+    closePhotoMenu();
+    imageInput.click();
+  });
+  pmToggle.addEventListener('click', () => {
+    closePhotoMenu();
     photoOn = !photoOn;
     btnPhoto.classList.toggle('active', photoOn);
     if (photoOn) photoReveal = 0;
   });
+
+  // --- live camera (webcam on Mac/PC, front/back camera on phones) ---
+  async function openCamera() {
+    closePhotoMenu();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setLabel('camera not available in this browser');
+      return;
+    }
+    try {
+      camStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: camFacing, width: { ideal: 1280 }, height: { ideal: 1280 } },
+        audio: false
+      });
+      camVideo.srcObject = camStream;
+      camVideo.classList.toggle('mirror', camFacing === 'user');
+      camOverlay.classList.add('open');
+    } catch (err) {
+      setLabel('camera blocked &middot; allow it in browser settings');
+    }
+  }
+  function closeCamera() {
+    if (camStream) { camStream.getTracks().forEach((tr) => tr.stop()); camStream = null; }
+    camVideo.srcObject = null;
+    camOverlay.classList.remove('open');
+  }
+  pmCamera.addEventListener('click', openCamera);
+  camCancel.addEventListener('click', closeCamera);
+  camFlip.addEventListener('click', () => {
+    camFacing = camFacing === 'user' ? 'environment' : 'user';
+    closeCamera();
+    openCamera();
+  });
+  camShot.addEventListener('click', async () => {
+    if (!camStream) return;
+    const w = camVideo.videoWidth, h = camVideo.videoHeight;
+    if (!w || !h) return;
+    const shot = document.createElement('canvas');
+    shot.width = w; shot.height = h;
+    const sx = shot.getContext('2d');
+    if (camFacing === 'user') { // mirror selfies so they match the preview
+      sx.translate(w, 0); sx.scale(-1, 1);
+    }
+    sx.drawImage(camVideo, 0, 0, w, h);
+    closeCamera();
+    setLabel('decomposing image…');
+    const blob = await new Promise((res) => shot.toBlob(res, 'image/jpeg', 0.92));
+    try {
+      await loadImageFile(blob);
+      photoOn = true;
+      photoReveal = 0;
+      btnPhoto.classList.add('active');
+      setLabel('hologram &middot; tap &#128247; for options');
+    } catch (e) {
+      setLabel('could not capture that shot');
+    }
+  });
+
   imageInput.addEventListener('change', async () => {
     const file = imageInput.files[0];
     if (!file) return;
@@ -515,7 +673,7 @@
       photoOn = true;
       photoReveal = 0;
       btnPhoto.classList.add('active');
-      setLabel('hologram &middot; double-tap &#128247; to change');
+      setLabel('hologram &middot; tap &#128247; for options');
     } catch (e) {
       setLabel('could not read that image');
     }

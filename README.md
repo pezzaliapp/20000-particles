@@ -49,7 +49,8 @@ Note: the microphone requires HTTPS — it works on GitHub Pages and as an insta
 - Calm: the hologram hovers gently. Swarm: its shadows fray into the swarm and glow hot while the bright structure holds, so the picture stays readable
 - Audio: bass pumps the depth, the spectrum ripples it left (bass) to right (treble), beats flash it
 - Auto-contrast + gamma lift keep any photo bright on the additive renderer; points grow ~2x while the hologram is on
-- Tap to toggle on/off; double-tap to pick a different image
+- Tap 📷 to open the menu: **Library** (pick a file / photo roll), **Camera** (live webcam on Mac/PC, front or back camera on phones — flip, frame, shoot), **Show/Hide** the hologram
+- Selfies are mirrored to match the preview; everything stays on your device
 
 
 ## Demo track
