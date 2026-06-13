@@ -90,11 +90,13 @@
 
   #photoMenu {
     position: fixed;
-    bottom: calc(72px + env(safe-area-inset-bottom));
+    bottom: calc(72px + env(safe-area-inset-bottom)); /* fallback: JS lo posiziona sopra la barra */
     left: 0; right: 0;
     display: none;
     justify-content: center;
+    flex-wrap: nowrap;
     gap: 10px;
+    padding: 0 16px;
     z-index: 3;
   }
   #photoMenu.open { display: flex; }
@@ -154,38 +156,38 @@
 
 <header>
   <div>
-    <div class="title">20000 Particles <span style="color:#5c5c5c;font-size:10px;font-weight:400">v15</span></div>
+    <div class="title">20000 Particles <span style="color:#5c5c5c;font-size:10px;font-weight:400">v16</span></div>
     <div class="sub">
-      <span id="sourceLabel">count = 20000 &middot; THREE.Points</span>
+      <span id="sourceLabel">particelle &middot; THREE.Points</span>
       <span id="vu"><span id="vuFill"></span></span>
     </div>
   </div>
-  <div class="hint">drag to rotate<br/>touch to heat</div>
+  <div class="hint">trascina per ruotare<br/>tocca per scaldare</div>
 </header>
 
 <nav>
-  <button class="mode active" id="btnCalm">Calm</button>
-  <button class="mode" id="btnSwarm">Swarm</button>
-  <button class="mode" id="btnPhoto">&#128247; Photo</button>
-  <button class="mode" id="btnMic">&#127908; Mic</button>
-  <button class="mode" id="btnTrack">&#9835; Track</button>
+  <button class="mode active" id="btnCalm">Calma</button>
+  <button class="mode" id="btnSwarm">Sciame</button>
+  <button class="mode" id="btnPhoto">&#128247; Foto</button>
+  <button class="mode" id="btnMic">&#127908; Microfono</button>
+  <button class="mode" id="btnTrack">&#9835; Traccia</button>
   <button class="mode" id="btnDemo">&#9658; Demo</button>
 </nav>
 <input type="file" id="fileInput" accept="audio/*" />
 <input type="file" id="imageInput" accept="image/*" />
 
 <div id="photoMenu">
-  <button class="mode" id="pmLibrary">&#128193; Library</button>
-  <button class="mode" id="pmCamera">&#128248; Camera</button>
-  <button class="mode" id="pmToggle" style="display:none">&#128065; Hide</button>
+  <button class="mode" id="pmLibrary">&#128193; Galleria</button>
+  <button class="mode" id="pmCamera">&#128248; Fotocamera</button>
+  <button class="mode" id="pmToggle" style="display:none">&#128065; Nascondi</button>
 </div>
 
 <div id="camOverlay">
   <video id="camVideo" autoplay playsinline muted></video>
   <div id="camBar">
-    <button class="camSide" id="camCancel">Cancel</button>
-    <button id="camShot" aria-label="Take photo"></button>
-    <button class="camSide" id="camFlip">Flip</button>
+    <button class="camSide" id="camCancel">Annulla</button>
+    <button id="camShot" aria-label="Scatta foto"></button>
+    <button class="camSide" id="camFlip">Cambia</button>
   </div>
 </div>
 
@@ -264,19 +266,73 @@
   const hotA = new THREE.Color(1.0, 0.42, 0.13);
   const hotB = new THREE.Color(1.0, 0.72, 0.35);
 
-  // ============ PHOTO PLANET ============
-  // The photo IS the sphere. Particles are importance-sampled where the
-  // image has LIGHT and placed on the sphere surface: the picture wraps
-  // the front, mirrored on the back, seamless while it spins. All the
-  // sphere's life applies to it — rotation, breathing, Swarm boil, music,
-  // touch. Dark areas hold no particles: the portrait is made of light.
-  const imgDir = new Float32Array(COUNT * 3);
-  const imgCol = new Float32Array(COUNT * 3);
-  const imgLum = new Float32Array(COUNT);
+  // ============ PHOTO — bas-relief portrait (separate layer) ============
+  // A flat grid of particles facing the camera, NOT wrapped on the sphere.
+  // Normal blending + depth-test so dark pixels render DARK (the face stays
+  // readable — eyes/mouth are dark dots IN PLACE, not holes), and z-displacement
+  // by luminance turns it into a 3D bas-relief that lives through parallax +
+  // audio + touch. The additive swarm dims to a glowing halo behind it.
+  const PG = isSmall ? 96 : 140;          // grid side
+  const PCOUNT = PG * PG;
+  const pPos = new Float32Array(PCOUNT * 3);
+  const pCol = new Float32Array(PCOUNT * 3);
+  const pBaseX = new Float32Array(PCOUNT);     // plane coords in [-1, 1]
+  const pBaseY = new Float32Array(PCOUNT);
+  const pBaseZ = new Float32Array(PCOUNT);     // relief height (luminance)
+  const pBaseCol = new Float32Array(PCOUNT * 3); // shaded + vignetted base color
+  const pLum = new Float32Array(PCOUNT);
+  for (let j = 0; j < PG; j++) {
+    for (let k = 0; k < PG; k++) {
+      const idx = j * PG + k;
+      pBaseX[idx] = ((k + 0.5) / PG - 0.5) * 2;
+      pBaseY[idx] = (0.5 - (j + 0.5) / PG) * 2;  // image top -> +y
+    }
+  }
+  const pGeom = new THREE.BufferGeometry();
+  pGeom.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+  pGeom.setAttribute('color', new THREE.BufferAttribute(pCol, 3));
+
+  // opaque round dot: alphaTest clips the sprite square into a disk
+  const dotCnv = document.createElement('canvas');
+  dotCnv.width = dotCnv.height = 64;
+  const dctx = dotCnv.getContext('2d');
+  const dgrad = dctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  dgrad.addColorStop(0.0, 'rgba(255,255,255,1)');
+  dgrad.addColorStop(0.62, 'rgba(255,255,255,1)');
+  dgrad.addColorStop(1.0, 'rgba(255,255,255,0)');
+  dctx.fillStyle = dgrad;
+  dctx.fillRect(0, 0, 64, 64);
+  const dotSprite = new THREE.CanvasTexture(dotCnv);
+
+  const PHOTO_SIZE = isSmall ? 0.030 : 0.024;
+  const pMat = new THREE.PointsMaterial({
+    size: PHOTO_SIZE,
+    map: dotSprite,
+    vertexColors: true,
+    transparent: false,
+    alphaTest: 0.5,
+    depthTest: true,
+    depthWrite: true,            // writes depth so the swarm behind is occluded
+    blending: THREE.NormalBlending
+  });
+  const photoGroup = new THREE.Group();
+  photoGroup.position.z = 0.35;  // sit near the front of the sphere
+  const photoPoints = new THREE.Points(pGeom, pMat);
+  photoPoints.visible = false;
+  photoGroup.add(photoPoints);
+  scene.add(photoGroup);
+
+  // reusable math for the portrait's touch raycast (against its tilted plane)
+  const pInv = new THREE.Matrix4();
+  const pHit = new THREE.Vector3();
+  const pLocalHit = new THREE.Vector3();
+  const pNormal = new THREE.Vector3();
+  const pPlane = new THREE.Plane();
+
   let hasImage = false;
   let photoOn = false;
-  let photoSkin = 0;
-  let photoReveal = 0;
+  let photoMix = 0;      // eased presence of the portrait (0..1)
+  let photoReveal = 0;   // staggered fade-in after load
 
   async function loadImageFile(file) {
     let bmp;
@@ -324,41 +380,55 @@
       return Math.min(1, Math.pow(c, GAMMA) * BOOST);
     }
 
-    // Paint the photo onto the EXISTING uniform sphere instead of importance-
-    // sampling by brightness. Every particle keeps its uniform home direction
-    // and reads the image at its projected coordinate, so dark features (eyes,
-    // mouth, contour) stay in place as DIM particles rather than becoming holes
-    // — structure survives, the face stays readable. The view-dependent fade in
-    // the render loop then hides the back hemisphere, so there is no ghosting.
-    for (let i = 0; i < COUNT; i++) {
-      const ix = i * 3;
-      const dx = dirs[ix], dy = dirs[ix + 1], dz = dirs[ix + 2];
+    // Build the bas-relief. Each grid particle reads the image at its planar
+    // coordinate: z = luminance (relief), color = pixel * directional shading
+    // from the luminance gradient, vignetted so the card melts into the swarm.
+    const Lg = new Float32Array(S * S);
+    for (let c = 0; c < S * S; c++) {
+      const q = c * 4;
+      Lg[c] = (data[q] * 0.2126 + data[q + 1] * 0.7152 + data[q + 2] * 0.0722) / 255;
+    }
+    let Lx = -0.45, Ly = -0.6, Lz = 0.66;          // key light direction
+    const Lnorm = 1 / Math.sqrt(Lx * Lx + Ly * Ly + Lz * Lz);
+    Lx *= Lnorm; Ly *= Lnorm; Lz *= Lnorm;
 
-      // equirectangular front-hemisphere mapping, mirrored onto the back so the
-      // globe is a face from either side and the seam falls at the silhouette.
-      const theta = Math.acos(Math.max(-1, Math.min(1, dy)));   // 0..π  -> v
-      let phi = Math.atan2(dx, dz);                             // -π..π (0 = front)
-      if (phi > Math.PI / 2) phi = Math.PI - phi;
-      else if (phi < -Math.PI / 2) phi = -Math.PI - phi;
-      const u = phi / Math.PI + 0.5;     // 0..1 across the face
-      const v = theta / Math.PI;         // 0..1 top -> bottom
-
+    for (let idx = 0; idx < PCOUNT; idx++) {
+      const ix = idx * 3;
+      const bx = pBaseX[idx], by = pBaseY[idx];
+      const u = bx * 0.5 + 0.5, v = 0.5 - by * 0.5;
       let cx = (u * (S - 1)) | 0;
       let cy = (v * (S - 1)) | 0;
       if (cx < 0) cx = 0; else if (cx > S - 1) cx = S - 1;
       if (cy < 0) cy = 0; else if (cy > S - 1) cy = S - 1;
-      const p4 = (cy * S + cx) * 4;
+      const cell = cy * S + cx;
+      const q = cell * 4;
+      const lum = Lg[cell];
+      pLum[idx] = lum;
+      pBaseZ[idx] = lum;
 
-      imgCol[ix] = px(data[p4]);
-      imgCol[ix + 1] = px(data[p4 + 1]);
-      imgCol[ix + 2] = px(data[p4 + 2]);
-      imgLum[i] = (data[p4] * 0.2126 + data[p4 + 1] * 0.7152 + data[p4 + 2] * 0.0722) / 255;
+      // surface normal from the luminance gradient -> directional shading (form)
+      const xl = cx > 0 ? cell - 1 : cell;
+      const xr = cx < S - 1 ? cell + 1 : cell;
+      const yt = cy > 0 ? cell - S : cell;
+      const yb = cy < S - 1 ? cell + S : cell;
+      const nx = (Lg[xl] - Lg[xr]) * 2.4;
+      const ny = (Lg[yt] - Lg[yb]) * 2.4;
+      const inl = 1 / Math.sqrt(nx * nx + ny * ny + 1);
+      const diff = Math.max(0, (nx * Lx + ny * Ly + Lz) * inl);
+      const shade = 0.6 + 0.7 * diff;
 
-      // home position is the uniform sphere itself: the photo never boils,
-      // it only lights up the particles that are already there.
-      imgDir[ix] = dx; imgDir[ix + 1] = dy; imgDir[ix + 2] = dz;
+      // soft oval vignette: the portrait fades to black into the swarm halo
+      const rr = Math.sqrt(bx * bx + by * by);
+      let vig = (1.05 - rr) / 0.35;
+      vig = vig < 0 ? 0 : (vig > 1 ? 1 : vig);
+      vig = vig * vig * (3 - 2 * vig);
+
+      pBaseCol[ix]     = Math.min(1, px(data[q])     * shade) * vig;
+      pBaseCol[ix + 1] = Math.min(1, px(data[q + 1]) * shade) * vig;
+      pBaseCol[ix + 2] = Math.min(1, px(data[q + 2]) * shade) * vig;
     }
     hasImage = true;
+    photoReveal = 0;
   }
 
   // ============ POINTER ============
@@ -442,7 +512,7 @@
   }
 
   function setLabel(html) { sourceLabel.innerHTML = html; }
-  const DEFAULT_LABEL = 'count = ' + COUNT + ' &middot; THREE.Points';
+  const DEFAULT_LABEL = 'particelle = ' + COUNT + ' &middot; THREE.Points';
   setLabel(DEFAULT_LABEL); // show the real particle count on load (9000 on small screens)
 
   function stopMic() {
@@ -465,7 +535,7 @@
   btnMic.addEventListener('click', async () => {
     if (audioMode === 'mic') { deactivateAudio(); return; }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setLabel('mic not available in this browser');
+      setLabel('microfono non disponibile in questo browser');
       return;
     }
     try {
@@ -481,9 +551,9 @@
       runningMax = 0.05;
       btnMic.classList.add('active');
       vu.classList.add('on');
-      setLabel('<span class="live">&#9679; live</span> &middot; listening');
+      setLabel('<span class="live">&#9679; dal vivo</span> &middot; in ascolto');
     } catch (err) {
-      setLabel('mic blocked &middot; allow it in browser settings');
+      setLabel('microfono bloccato &middot; consentilo nelle impostazioni del browser');
     }
   });
 
@@ -497,7 +567,7 @@
         setLabel('<span class="live">&#9654;</span> ' + trackName);
       } else {
         audioEl.pause();
-        setLabel('&#10074;&#10074; paused &middot; tap Track to resume');
+        setLabel('&#10074;&#10074; in pausa &middot; tocca Traccia per riprendere');
       }
       return;
     }
@@ -519,7 +589,7 @@
     if (audioEl.src && audioEl.src.startsWith('blob:')) URL.revokeObjectURL(audioEl.src);
     audioEl.src = URL.createObjectURL(file);
     outGain.gain.value = 1;
-    audioEl.play().catch(() => { setLabel('tap Track to start playback'); });
+    audioEl.play().catch(() => { setLabel('tocca Traccia per avviare'); });
     audioMode = 'track';
     isDemo = false;
     btnDemo.classList.remove('active');
@@ -541,7 +611,7 @@
         setLabel('<span class="live">&#9654;</span> ' + DEMO_NAME);
       } else {
         audioEl.pause();
-        setLabel('&#10074;&#10074; paused &middot; tap Demo to resume');
+        setLabel('&#10074;&#10074; in pausa &middot; tocca Demo per riprendere');
       }
       return;
     }
@@ -557,7 +627,7 @@
     if (audioEl.src && audioEl.src.startsWith('blob:')) URL.revokeObjectURL(audioEl.src);
     audioEl.src = DEMO_URL;
     outGain.gain.value = 1;
-    audioEl.play().catch(() => { setLabel('tap Demo to start playback'); });
+    audioEl.play().catch(() => { setLabel('tocca Demo per avviare'); });
     audioMode = 'track';
     isDemo = true;
     runningMax = 0.15;
@@ -584,7 +654,11 @@
   function closePhotoMenu() { photoMenu.classList.remove('open'); }
   function openPhotoMenu() {
     pmToggle.style.display = hasImage ? '' : 'none';
-    pmToggle.innerHTML = photoOn ? '&#128065; Hide' : '&#128065; Show';
+    pmToggle.innerHTML = photoOn ? '&#128065; Nascondi' : '&#128065; Mostra';
+    // riga pulita SOPRA la barra, qualunque sia la sua altezza: su schermi
+    // stretti la barra va a due righe e prima il menu la copriva.
+    const navTop = document.querySelector('nav').getBoundingClientRect().top;
+    photoMenu.style.bottom = (window.innerHeight - navTop + 12) + 'px';
     photoMenu.classList.add('open');
   }
   btnPhoto.addEventListener('click', (e) => {
@@ -610,7 +684,7 @@
   async function openCamera() {
     closePhotoMenu();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setLabel('camera not available in this browser');
+      setLabel('fotocamera non disponibile in questo browser');
       return;
     }
     try {
@@ -622,7 +696,7 @@
       camVideo.classList.toggle('mirror', camFacing === 'user');
       camOverlay.classList.add('open');
     } catch (err) {
-      setLabel('camera blocked &middot; allow it in browser settings');
+      setLabel('fotocamera bloccata &middot; consentila nelle impostazioni del browser');
     }
   }
   function closeCamera() {
@@ -649,31 +723,31 @@
     }
     sx.drawImage(camVideo, 0, 0, w, h);
     closeCamera();
-    setLabel('decomposing image…');
+    setLabel('scomposizione immagine…');
     const blob = await new Promise((res) => shot.toBlob(res, 'image/jpeg', 0.92));
     try {
       await loadImageFile(blob);
       photoOn = true;
       photoReveal = 0;
       btnPhoto.classList.add('active');
-      setLabel('photo planet &middot; tap &#128247; for options');
+      setLabel('ritratto di luce &middot; tocca &#128247; per le opzioni');
     } catch (e) {
-      setLabel('could not capture that shot');
+      setLabel('impossibile catturare lo scatto');
     }
   });
 
   imageInput.addEventListener('change', async () => {
     const file = imageInput.files[0];
     if (!file) return;
-    setLabel('decomposing image…');
+    setLabel('scomposizione immagine…');
     try {
       await loadImageFile(file);
       photoOn = true;
       photoReveal = 0;
       btnPhoto.classList.add('active');
-      setLabel('photo planet &middot; tap &#128247; for options');
+      setLabel('ritratto di luce &middot; tocca &#128247; per le opzioni');
     } catch (e) {
-      setLabel('could not read that image');
+      setLabel('impossibile leggere l\'immagine');
     }
     imageInput.value = '';
   });
@@ -740,6 +814,80 @@
   btnCalm.addEventListener('click', () => setMode(0));
   btnSwarm.addEventListener('click', () => setMode(1));
 
+  // ---- PHOTO bas-relief update: relief + parallax + audio + touch, all carried
+  //      so the portrait feels alive while staying perfectly readable ----
+  function updatePhoto(t, audioResp, energy) {
+    photoPoints.visible = photoMix > 0.004;
+    if (!photoPoints.visible) return;
+
+    // parallax: a fraction of the drag + a slow sway, always springing to front
+    photoGroup.rotation.y += velY * 0.6 + Math.sin(t * 0.35) * 0.0016 - photoGroup.rotation.y * 0.02;
+    photoGroup.rotation.x += velX * 0.6 + Math.sin(t * 0.27) * 0.0011 - photoGroup.rotation.x * 0.02;
+    const LIM = 0.42;                       // ~24°: the face never turns away
+    photoGroup.rotation.y = Math.max(-LIM, Math.min(LIM, photoGroup.rotation.y));
+    photoGroup.rotation.x = Math.max(-LIM, Math.min(LIM, photoGroup.rotation.x));
+    photoGroup.updateMatrixWorld();
+
+    // touch -> a point on the tilted portrait plane
+    let pHasHit = false, lhx = 0, lhy = 0;
+    if (ndc.x < 5) {
+      raycaster.setFromCamera(ndc, camera);
+      pNormal.set(0, 0, 1).applyQuaternion(photoGroup.quaternion);
+      pPlane.setFromNormalAndCoplanarPoint(pNormal, photoGroup.position);
+      if (raycaster.ray.intersectPlane(pPlane, pHit)) {
+        pInv.copy(photoGroup.matrixWorld).invert();
+        pLocalHit.copy(pHit).applyMatrix4(pInv);
+        lhx = pLocalHit.x; lhy = pLocalHit.y;
+        pHasHit = true;
+      }
+    }
+
+    const reliefAmp = 0.30 * (1 + bass * 0.8 * audioResp) + beat * 0.10;
+    const beatLum = 1 + (beat * 0.55 + level * 0.30) * (audioMode !== 'none' ? 1 : 0);
+    const breath = 1 + 0.02 * Math.sin(t * 1.3);
+    pMat.size = PHOTO_SIZE * (1 + energy * 0.18);
+
+    for (let idx = 0; idx < PCOUNT; idx++) {
+      const ix = idx * 3;
+      const bx = pBaseX[idx], by = pBaseY[idx];
+
+      // staggered reveal: the brightest particles light up first
+      let rev = photoReveal >= 1 ? 1 : (photoReveal * 1.5 - (1 - pLum[idx]) * 0.8) * 2;
+      rev = rev < 0 ? 0 : (rev > 1 ? 1 : rev);
+
+      // 3D relief + a gentle living ripple across the surface
+      let z = (pBaseZ[idx] - 0.5) * reliefAmp;
+      z += Math.sin(bx * 6 + t * 1.6) * 0.012 + Math.sin(by * 5 - t * 1.2) * 0.012;
+
+      let heat = 0;
+      if (pHasHit) {
+        const ex = bx - lhx, ey = by - lhy;
+        const dd = Math.sqrt(ex * ex + ey * ey);
+        if (dd < 0.5) {
+          const ff = (1 - dd / 0.5) * (1 - dd / 0.5);
+          z += ff * 0.18 * (0.5 + touchHeat);
+          heat = ff;
+        }
+      }
+
+      pPos[ix] = bx * breath;
+      pPos[ix + 1] = by * breath;
+      pPos[ix + 2] = z;
+
+      // color = shaded base * (twinkle + beat + spectrum), faded by reveal & mix
+      const flick = 0.6 + 0.4 * Math.sin(t * 3.2 + bx * 9 + by * 7);
+      const bnd = Math.min(BANDS - 1, (Math.abs(by) * BANDS) | 0);
+      const specLum = 1 + spectrum[bnd] * (0.4 + 0.7 * agitation);
+      const shimmer = (0.85 + 0.2 * flick) * beatLum * specLum + heat * 1.2;
+      const m = photoMix * rev * shimmer;
+      pCol[ix] = Math.min(1, pBaseCol[ix] * m);
+      pCol[ix + 1] = Math.min(1, pBaseCol[ix + 1] * m);
+      pCol[ix + 2] = Math.min(1, pBaseCol[ix + 2] * m);
+    }
+    pGeom.attributes.position.needsUpdate = true;
+    pGeom.attributes.color.needsUpdate = true;
+  }
+
   // ============ LOOP ============
   let agitation = 0;
   const driftSpeed = reduceMotion ? 0 : 0.0012;
@@ -750,14 +898,10 @@
     updateAudio();
 
     agitation += (modeTarget - agitation) * 0.04;
-    photoSkin += ((photoOn ? 1 : 0) - photoSkin) * 0.03;
-    if (photoSkin < 0.001) photoSkin = 0;
+    photoMix += ((photoOn && hasImage ? 1 : 0) - photoMix) * 0.05;
+    if (photoMix < 0.001) photoMix = 0;
     if (photoReveal < 1) photoReveal = Math.min(1, photoReveal + 0.012);
     touchHeat *= 0.96;
-
-    const ps = photoSkin;
-    const sw = 1 - ps;
-    const scramble = ps * (1 - ps) * 4; // decompose / mix / recompose in flight
 
     const audioResp = 0.35 + 0.65 * agitation;
     const audioEnergy = (audioMode !== 'none')
@@ -770,11 +914,7 @@
     group.rotation.x += velX;
     velX *= 0.92; velY *= 0.92;
 
-    // world-space orientation (3rd row of the matrix), so the photo can fade by
-    // how much each particle faces the camera — the ghost killer, computed once.
     group.updateMatrixWorld();
-    const me = group.matrixWorld.elements;
-    const e2 = me[2], e6 = me[6], e10 = me[10];
 
     hasHit = false;
     if (ndc.x < 5) {
@@ -786,39 +926,24 @@
       }
     }
 
-    // shared radius dynamics: breathing, jitter, spectrum waves by latitude
-    const jitterAmp = 0.05 * energy + 0.008 * ps; // the photo shimmers even in Calm
+    // swarm radius dynamics: breathing, jitter, spectrum waves by latitude
+    const jitterAmp = 0.05 * energy;
     const breathe = 1 + 0.012 * Math.sin(t * 1.4)
       + bass * 0.12 * audioResp
       + beat * 0.07 * audioResp;
-    const specAmp = (0.16 + 0.26 * agitation) * (1 - ps * 0.55) + beat * 0.10 * agitation;
+    const specAmp = (0.16 + 0.26 * agitation) + beat * 0.10 * agitation;
     const heatResp = 0.35 + 0.65 * agitation;
-    const photoBeatLum = 1 + (beat * 0.5 + level * 0.25) * (audioMode !== 'none' ? 1 : 0);
-
-    material.size = BASE_SIZE * (1 + ps * 0.7);
+    const swarmDim = 1 - 0.82 * photoMix; // the swarm fades to a halo behind the photo
 
     for (let i = 0; i < COUNT; i++) {
       const ix = i * 3;
 
-      // direction: golden Fibonacci sphere <-> photo constellation
-      let dx = dirs[ix] * sw + imgDir[ix] * ps;
-      let dy = dirs[ix + 1] * sw + imgDir[ix + 1] * ps;
-      let dz = dirs[ix + 2] * sw + imgDir[ix + 2] * ps;
-      const dl = 1 / Math.sqrt(dx * dx + dy * dy + dz * dz + 1e-9);
-      dx *= dl; dy *= dl; dz *= dl;
+      const dx = dirs[ix], dy = dirs[ix + 1], dz = dirs[ix + 2];
 
-      // radius: the same living dynamics for swarm and photo planet
       const n = Math.sin(t * 2.0 * freq[i] + phase[i]);
       let r = RADIUS * breathe + n * jitterAmp;
       const svS = spectrum[band[i]];
-      // per-band radial waves boil the image, so they fade out as the photo
-      // takes over (sw = 1 - photoSkin); the photo answers the music with LIGHT.
-      r += svS * specAmp * (0.5 + 0.5 * Math.sin(phase[i] + t * 3)) * sw;
-
-      // mid-morph scramble
-      if (scramble > 0.01) {
-        r += Math.sin(t * 6.3 * freq[i] + phase[i] * 1.7) * scramble * 0.22;
-      }
+      r += svS * specAmp * (0.5 + 0.5 * Math.sin(phase[i] + t * 3));
 
       // touch: heat and push
       let heat = 0;
@@ -845,46 +970,17 @@
       let cb = calm.b + (hotA.b + (hotB.b - hotA.b) * flick - calm.b) * mixHot;
       const lumP = (0.6 + 0.4 * (0.4 + 0.6 * flick) * (0.5 + 0.5 * mixHot))
         * (1 + beat * 0.35 * audioResp);
-      cr *= lumP; cg *= lumP; cb *= lumP;
-
-      // --- photo color: view-faded pixel light + twinkle + spectrum + beat ---
-      let s = ps;
-      if (ps > 0.001 && photoReveal < 1) {
-        const stagger = phase[i] / TWO_PI;
-        s *= Math.max(0, Math.min(1, (photoReveal * 1.6 - stagger) * 2.5));
-      }
-      if (s > 0.001) {
-        const lum = imgLum[i];
-        // view-dependent emission: only the camera-facing shell glows, so the
-        // back never shines through (no ghost). The soft remap leaves a thin rim
-        // of light at the silhouette — the sphere reads as a solid head of light.
-        const facing = e2 * dx + e6 * dy + e10 * dz;
-        let f = (facing + 0.15) * 1.25;
-        f = f < 0 ? 0 : (f > 1 ? 1 : f);
-        const faceLight = f * f * (3 - 2 * f);
-        // life carried by LIGHT, not motion: a constant per-particle twinkle so
-        // it never looks frozen, the music's spectrum lighting up the face, and
-        // a beat pulse — all over a geometry that stays perfectly legible.
-        const twinkle = 0.78 + 0.34 * flick;
-        const specLum = 1 + svS * (0.5 + 0.8 * agitation);
-        const burn = agitation * (1 - lum) * 0.30 + heat * 0.5;
-        const shimmer = twinkle * photoBeatLum * specLum + heat * 1.0;
-        const emit = faceLight * shimmer;
-        const pr = (imgCol[ix] * (1 - burn) + cr * burn) * emit;
-        const pg = (imgCol[ix + 1] * (1 - burn) + cg * burn) * emit;
-        const pb = (imgCol[ix + 2] * (1 - burn) + cb * burn) * emit;
-        cr = cr * (1 - s) + pr * s;
-        cg = cg * (1 - s) + pg * s;
-        cb = cb * (1 - s) + pb * s;
-      }
-
-      colors[ix] = cr;
-      colors[ix + 1] = cg;
-      colors[ix + 2] = cb;
+      const dim = lumP * swarmDim;     // swarm recedes to a halo behind the photo
+      colors[ix] = cr * dim;
+      colors[ix + 1] = cg * dim;
+      colors[ix + 2] = cb * dim;
     }
 
     geometry.attributes.position.needsUpdate = true;
     geometry.attributes.color.needsUpdate = true;
+
+    updatePhoto(t, audioResp, energy);
+
     renderer.render(scene, camera);
     requestAnimationFrame(animate);
   }
