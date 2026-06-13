@@ -154,7 +154,7 @@
 
 <header>
   <div>
-    <div class="title">20000 Particles <span style="color:#5c5c5c;font-size:10px;font-weight:400">v14</span></div>
+    <div class="title">20000 Particles <span style="color:#5c5c5c;font-size:10px;font-weight:400">v15</span></div>
     <div class="sub">
       <span id="sourceLabel">count = 20000 &middot; THREE.Points</span>
       <span id="vu"><span id="vuFill"></span></span>
@@ -324,52 +324,39 @@
       return Math.min(1, Math.pow(c, GAMMA) * BOOST);
     }
 
-    // importance sampling on the SPHERE: weight = luminance * sin(theta)
-    // (solid-angle correction) -> particles live where the light lives.
-    const lumGrid = new Float32Array(S * S);
-    for (let c = 0; c < S * S; c++) {
-      const p4 = c * 4;
-      lumGrid[c] = (data[p4] * 0.2126 + data[p4 + 1] * 0.7152 + data[p4 + 2] * 0.0722) / 255;
-    }
-    const cum = new Float64Array(S * S);
-    let wTotal = 0;
-    for (let c = 0; c < S * S; c++) {
-      const cy2 = (c / S) | 0;
-      const theta = ((cy2 + 0.5) / S) * Math.PI;
-      wTotal += (Math.pow(lumGrid[c], 1.5) + 0.004) * Math.sin(theta);
-      cum[c] = wTotal;
-    }
-
+    // Paint the photo onto the EXISTING uniform sphere instead of importance-
+    // sampling by brightness. Every particle keeps its uniform home direction
+    // and reads the image at its projected coordinate, so dark features (eyes,
+    // mouth, contour) stay in place as DIM particles rather than becoming holes
+    // — structure survives, the face stays readable. The view-dependent fade in
+    // the render loop then hides the back hemisphere, so there is no ghosting.
     for (let i = 0; i < COUNT; i++) {
-      const rT = Math.random() * wTotal;
-      let a = 0, b2 = S * S - 1;
-      while (a < b2) {
-        const m = (a + b2) >> 1;
-        if (cum[m] < rT) a = m + 1; else b2 = m;
-      }
-      const cell = a;
-      const cx = cell % S;
-      const cy = (cell / S) | 0;
-      // sub-pixel jitter: organic, no grid
-      const u = (cx + 0.5 + (Math.random() - 0.5)) / S;
-      const v = (cy + 0.5 + (Math.random() - 0.5)) / S;
-
-      // the picture covers the front hemisphere; half the particles build
-      // a mirrored copy on the back, so the globe is full while it spins
-      const theta = v * Math.PI;
-      const phiFront = (u - 0.5) * Math.PI;
-      const mirror = (i & 1) === 0 ? 1 : -1;
-      const sinT = Math.sin(theta);
       const ix = i * 3;
-      imgDir[ix] = Math.sin(phiFront) * sinT;
-      imgDir[ix + 1] = Math.cos(theta);
-      imgDir[ix + 2] = Math.cos(phiFront) * sinT * mirror;
+      const dx = dirs[ix], dy = dirs[ix + 1], dz = dirs[ix + 2];
 
-      const p4 = cell * 4;
+      // equirectangular front-hemisphere mapping, mirrored onto the back so the
+      // globe is a face from either side and the seam falls at the silhouette.
+      const theta = Math.acos(Math.max(-1, Math.min(1, dy)));   // 0..π  -> v
+      let phi = Math.atan2(dx, dz);                             // -π..π (0 = front)
+      if (phi > Math.PI / 2) phi = Math.PI - phi;
+      else if (phi < -Math.PI / 2) phi = -Math.PI - phi;
+      const u = phi / Math.PI + 0.5;     // 0..1 across the face
+      const v = theta / Math.PI;         // 0..1 top -> bottom
+
+      let cx = (u * (S - 1)) | 0;
+      let cy = (v * (S - 1)) | 0;
+      if (cx < 0) cx = 0; else if (cx > S - 1) cx = S - 1;
+      if (cy < 0) cy = 0; else if (cy > S - 1) cy = S - 1;
+      const p4 = (cy * S + cx) * 4;
+
       imgCol[ix] = px(data[p4]);
       imgCol[ix + 1] = px(data[p4 + 1]);
       imgCol[ix + 2] = px(data[p4 + 2]);
-      imgLum[i] = lumGrid[cell];
+      imgLum[i] = (data[p4] * 0.2126 + data[p4 + 1] * 0.7152 + data[p4 + 2] * 0.0722) / 255;
+
+      // home position is the uniform sphere itself: the photo never boils,
+      // it only lights up the particles that are already there.
+      imgDir[ix] = dx; imgDir[ix + 1] = dy; imgDir[ix + 2] = dz;
     }
     hasImage = true;
   }
@@ -455,6 +442,8 @@
   }
 
   function setLabel(html) { sourceLabel.innerHTML = html; }
+  const DEFAULT_LABEL = 'count = ' + COUNT + ' &middot; THREE.Points';
+  setLabel(DEFAULT_LABEL); // show the real particle count on load (9000 on small screens)
 
   function stopMic() {
     if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
@@ -470,7 +459,7 @@
     btnTrack.classList.remove('active');
     btnDemo.classList.remove('active');
     vu.classList.remove('on');
-    setLabel('count = 20000 &middot; THREE.Points');
+    setLabel(DEFAULT_LABEL);
   }
 
   btnMic.addEventListener('click', async () => {
@@ -781,6 +770,12 @@
     group.rotation.x += velX;
     velX *= 0.92; velY *= 0.92;
 
+    // world-space orientation (3rd row of the matrix), so the photo can fade by
+    // how much each particle faces the camera — the ghost killer, computed once.
+    group.updateMatrixWorld();
+    const me = group.matrixWorld.elements;
+    const e2 = me[2], e6 = me[6], e10 = me[10];
+
     hasHit = false;
     if (ndc.x < 5) {
       raycaster.setFromCamera(ndc, camera);
@@ -816,7 +811,9 @@
       const n = Math.sin(t * 2.0 * freq[i] + phase[i]);
       let r = RADIUS * breathe + n * jitterAmp;
       const svS = spectrum[band[i]];
-      r += svS * specAmp * (0.5 + 0.5 * Math.sin(phase[i] + t * 3));
+      // per-band radial waves boil the image, so they fade out as the photo
+      // takes over (sw = 1 - photoSkin); the photo answers the music with LIGHT.
+      r += svS * specAmp * (0.5 + 0.5 * Math.sin(phase[i] + t * 3)) * sw;
 
       // mid-morph scramble
       if (scramble > 0.01) {
@@ -850,7 +847,7 @@
         * (1 + beat * 0.35 * audioResp);
       cr *= lumP; cg *= lumP; cb *= lumP;
 
-      // --- photo color: pixel light + twinkle + Swarm burn + heat flare ---
+      // --- photo color: view-faded pixel light + twinkle + spectrum + beat ---
       let s = ps;
       if (ps > 0.001 && photoReveal < 1) {
         const stagger = phase[i] / TWO_PI;
@@ -858,11 +855,24 @@
       }
       if (s > 0.001) {
         const lum = imgLum[i];
-        const burn = agitation * (1 - lum) * 0.35 + heat * 0.5;
-        const shimmer = (0.82 + 0.32 * flick) * photoBeatLum + heat * 1.0;
-        const pr = (imgCol[ix] * (1 - burn) + cr * burn) * shimmer;
-        const pg = (imgCol[ix + 1] * (1 - burn) + cg * burn) * shimmer;
-        const pb = (imgCol[ix + 2] * (1 - burn) + cb * burn) * shimmer;
+        // view-dependent emission: only the camera-facing shell glows, so the
+        // back never shines through (no ghost). The soft remap leaves a thin rim
+        // of light at the silhouette — the sphere reads as a solid head of light.
+        const facing = e2 * dx + e6 * dy + e10 * dz;
+        let f = (facing + 0.15) * 1.25;
+        f = f < 0 ? 0 : (f > 1 ? 1 : f);
+        const faceLight = f * f * (3 - 2 * f);
+        // life carried by LIGHT, not motion: a constant per-particle twinkle so
+        // it never looks frozen, the music's spectrum lighting up the face, and
+        // a beat pulse — all over a geometry that stays perfectly legible.
+        const twinkle = 0.78 + 0.34 * flick;
+        const specLum = 1 + svS * (0.5 + 0.8 * agitation);
+        const burn = agitation * (1 - lum) * 0.30 + heat * 0.5;
+        const shimmer = twinkle * photoBeatLum * specLum + heat * 1.0;
+        const emit = faceLight * shimmer;
+        const pr = (imgCol[ix] * (1 - burn) + cr * burn) * emit;
+        const pg = (imgCol[ix + 1] * (1 - burn) + cg * burn) * emit;
+        const pb = (imgCol[ix + 2] * (1 - burn) + cb * burn) * emit;
         cr = cr * (1 - s) + pr * s;
         cg = cg * (1 - s) + pg * s;
         cb = cb * (1 - s) + pb * s;

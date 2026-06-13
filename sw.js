@@ -1,4 +1,4 @@
-const CACHE = '20000-particles-v14';
+const CACHE = '20000-particles-v15';
 const ASSETS = [
   './',
   './index.html',
@@ -33,8 +33,10 @@ self.addEventListener('fetch', (e) => {
     // The cache only serves when offline.
     e.respondWith(
       fetch(req).then((res) => {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(req, copy));
+        if (res && res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy));
+        }
         return res;
       }).catch(() => caches.match(req).then((c) => c || caches.match('./index.html')))
     );
